@@ -39,6 +39,18 @@ import {
 
 export type AdminTab = 'log_found' | 'claims' | 'resolved_history' | 'database';
 
+export interface ResolvedMatchedFoundDetails {
+  title: string;
+  category: ItemCategory;
+  dropLocation: string;
+  dateOccurred: string;
+  description: string;
+  imageDataUrl: string;
+  imageHash: string;
+  similarity: number;
+  adminNotes: string;
+}
+
 interface AdminDashboardProps {
   user: UserProfile;
   items: CampusItem[];
@@ -46,6 +58,10 @@ interface AdminDashboardProps {
   activeTab: AdminTab;
   setActiveTab: (tab: AdminTab) => void;
   onCreateItem: (item: Omit<CampusItem, 'createdAt' | 'updatedAt'>) => Promise<void>;
+  onResolveMatchedLostReport: (
+    lostItem: CampusItem,
+    foundDetails: ResolvedMatchedFoundDetails
+  ) => Promise<void>;
   onUpdateItemStatus: (itemId: string, status: ItemStatus) => Promise<void>;
   onUnresolveItem: (itemId: string) => Promise<void>;
   onDeleteItem: (itemId: string) => Promise<void>;
@@ -62,6 +78,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   activeTab,
   setActiveTab,
   onCreateItem,
+  onResolveMatchedLostReport,
   onUpdateItemStatus,
   onUnresolveItem,
   onDeleteItem,
@@ -94,6 +111,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [imageHash, setImageHash] = useState('');
   const [selectedPresetKey, setSelectedPresetKey] = useState<string>(PRESET_CAMPUS_VISUALS[0].key);
   const [submittingFound, setSubmittingFound] = useState(false);
+  const [selectedMatchedLostId, setSelectedMatchedLostId] = useState<string | null>(null);
+  const [directMatchNotesMap, setDirectMatchNotesMap] = useState<Record<string, string>>({});
+  const [approvingMatchedLostId, setApprovingMatchedLostId] = useState<string | null>(null);
 
   // Partition items and claims cleanly
   const activeFoundItems = useMemo(
@@ -129,12 +149,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         item.title.toLowerCase().includes(q) ||
         item.location.toLowerCase().includes(q) ||
         item.category.toLowerCase().includes(q) ||
-        item.reporterName.toLowerCase().includes(q)
+        item.reporterName.toLowerCase().includes(q) ||
+        item.id.toLowerCase().includes(q)
       );
     });
   }, [items, dbFilter, searchQuery]);
 
-  // Live perceptual hash correlation against existing student Lost Reports when logging a Found item
+  // Live perceptual hash correlation (> 70% similarity) against existing student Lost Reports when logging a Found item
   const potentialLostMatches = useMemo(() => {
     if (!imageHash) return [];
     return lostReports
@@ -142,9 +163,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         item: lostItem,
         similarity: comparePerceptualHashes(imageHash, lostItem.imageHash).matchPercentage,
       }))
-      .filter((m) => m.similarity >= 65)
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, 3);
+      .filter((m) => m.similarity > 70)
+      .sort((a, b) => b.similarity - a.similarity);
   }, [imageHash, lostReports]);
 
   const triggerBanner = (
@@ -175,10 +195,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           const computed = await computePerceptualHash(reader.result);
           setImageDataUrl(computed.previewDataUrl);
           setImageHash(computed.hashHex);
+          const matches = lostReports
+            .map((l) => ({
+              item: l,
+              similarity: comparePerceptualHashes(computed.hashHex, l.imageHash).matchPercentage,
+            }))
+            .filter((m) => m.similarity > 70)
+            .sort((a, b) => b.similarity - a.similarity);
+          setSelectedMatchedLostId(matches[0]?.item.id ?? null);
           onNotify(
             'Perceptual Hash Computed',
-            `Generated 64-bit dHash: ${computed.hashHex}`,
-            'info'
+            matches.length > 0
+              ? `dHash ${computed.hashHex} matched ${matches.length} student lost report(s) with > 70% similarity!`
+              : `Generated 64-bit dHash: ${computed.hashHex}`,
+            matches.length > 0 ? 'success' : 'info'
           );
         } catch (err) {
           console.error('Failed to process photo:', err);
@@ -200,11 +230,122 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setCategory(preset.category);
       setDescription(preset.defaultDescription);
     }
+    const matches = lostReports
+      .map((l) => ({
+        item: l,
+        similarity: comparePerceptualHashes(computed.hashHex, l.imageHash).matchPercentage,
+      }))
+      .filter((m) => m.similarity > 70)
+      .sort((a, b) => b.similarity - a.similarity);
+    setSelectedMatchedLostId(matches[0]?.item.id ?? null);
     onNotify(
-      'Studio Visual & Hash Ready',
-      `Applied ${preset?.label || presetKey} profile (dHash: ${computed.hashHex}).`,
-      'info'
+      matches.length > 0
+        ? `Matched Student Lost Report (${matches[0].similarity}%)`
+        : 'Studio Visual & Hash Ready',
+      matches.length > 0
+        ? `Tap ${matches[0].item.reporterName}'s report (> 70% match) to approve their claim & move directly to Resolved History.`
+        : `Applied ${preset?.label || presetKey} profile (dHash: ${computed.hashHex}).`,
+      matches.length > 0 ? 'success' : 'info'
     );
+  };
+
+  const handleSearchLostHashMatches = async () => {
+    let targetHash = imageHash;
+    if (!targetHash) {
+      const preset = PRESET_CAMPUS_VISUALS.find((p) => p.key === selectedPresetKey);
+      const canvasDataUrl = renderCampusItemCanvas(selectedPresetKey, 'catalog');
+      const computed = await computePerceptualHash(canvasDataUrl);
+      setImageDataUrl(computed.previewDataUrl);
+      setImageHash(computed.hashHex);
+      targetHash = computed.hashHex;
+      if (preset && !title.trim()) {
+        setTitle(preset.defaultTitle);
+        setCategory(preset.category);
+        setDescription(preset.defaultDescription);
+      }
+    }
+
+    const matches = lostReports
+      .map((l) => ({
+        item: l,
+        similarity: comparePerceptualHashes(targetHash, l.imageHash).matchPercentage,
+      }))
+      .filter((m) => m.similarity > 70)
+      .sort((a, b) => b.similarity - a.similarity);
+
+    if (matches.length > 0) {
+      setSelectedMatchedLostId(matches[0].item.id);
+      onNotify(
+        `Found ${matches.length} Student Match(es) > 70%`,
+        `Top match: "${matches[0].item.title}" reported by ${matches[0].item.reporterName} (${matches[0].similarity}% similarity). Tap to approve claim!`,
+        'success'
+      );
+    } else {
+      setSelectedMatchedLostId(null);
+      onNotify(
+        'No Lost Reports > 70% Similarity',
+        `Evaluated ${lostReports.length} active student lost reports against dHash 0x${targetHash}.`,
+        'info'
+      );
+    }
+  };
+
+  const handleDirectApproveMatchedLost = async (
+    matchedLostItem: CampusItem,
+    similarity: number
+  ) => {
+    setApprovingMatchedLostId(matchedLostItem.id);
+    try {
+      let finalDataUrl = imageDataUrl;
+      let finalHash = imageHash;
+
+      if (!finalDataUrl || !finalHash) {
+        const canvasDataUrl = renderCampusItemCanvas(selectedPresetKey, 'catalog');
+        const computed = await computePerceptualHash(canvasDataUrl);
+        finalDataUrl = computed.previewDataUrl;
+        finalHash = computed.hashHex;
+      }
+
+      const combinedLocation = customLocationNote.trim()
+        ? `${dropLocation} — ${customLocationNote.trim()}`
+        : dropLocation;
+
+      const defaultNote = `Matched via 64-bit perceptual hash (${similarity}% similarity) at ${dropLocation}. Ownership claim approved — unified item ID ${matchedLostItem.id} archived in Resolved History.`;
+      const adminNotes =
+        directMatchNotesMap[matchedLostItem.id]?.trim() || defaultNote;
+
+      await onResolveMatchedLostReport(matchedLostItem, {
+        title: title.trim() || matchedLostItem.title,
+        category: category || matchedLostItem.category,
+        dropLocation: combinedLocation.slice(0, 120),
+        dateOccurred,
+        description: description.trim() || matchedLostItem.description,
+        imageDataUrl: finalDataUrl,
+        imageHash: finalHash,
+        similarity,
+        adminNotes,
+      });
+
+      setTitle('');
+      setCustomLocationNote('');
+      setDescription('');
+      setImageDataUrl('');
+      setImageHash('');
+      setSelectedMatchedLostId(null);
+
+      triggerBanner(
+        `Approved ${matchedLostItem.reporterName}'s claim (${similarity}% hash match)! Unified Item ID "${matchedLostItem.id}" moved out of active directories into Resolved History with zero duplicates.`,
+        'success',
+        'resolved_history'
+      );
+      onNotify(
+        'Student Claim Approved & Unified in Resolved History',
+        `Matched item (${matchedLostItem.id}) for ${matchedLostItem.reporterName} moved directly to Resolved History.`,
+        'success'
+      );
+    } finally {
+      setApprovingMatchedLostId(null);
+    }
   };
 
   const handleLogFoundSubmit = async (e: React.FormEvent) => {
@@ -250,6 +391,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setDescription('');
       setImageDataUrl('');
       setImageHash('');
+      setSelectedMatchedLostId(null);
       triggerBanner(
         `"${loggedTitle}" logged from ${dropLocation} and published to the active Found Directory.`,
         'success'
@@ -723,34 +865,56 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               </div>
 
-              <div className="pt-2">
-                <motion.button
-                  whileHover={{ scale: 1.005 }}
-                  whileTap={{ scale: 0.985 }}
-                  type="submit"
-                  disabled={submittingFound}
-                  className="w-full py-3 px-4 bg-teal-700 hover:bg-teal-800 text-white font-semibold text-sm rounded-xl shadow-xs transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                >
-                  <PlusCircle className="w-4 h-4" />
-                  {submittingFound
-                    ? 'Computing Hash & Publishing to Found Directory...'
-                    : 'Publish Anonymous Drop-Off to Found Directory'}
-                </motion.button>
+              <div className="pt-2 space-y-2.5">
+                <div className="flex flex-col sm:flex-row gap-2.5">
+                  <motion.button
+                    whileHover={{ scale: 1.005 }}
+                    whileTap={{ scale: 0.985 }}
+                    type="button"
+                    onClick={handleSearchLostHashMatches}
+                    className="sm:w-auto py-3 px-4 bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 font-semibold text-xs rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer shrink-0"
+                  >
+                    <Fingerprint className="w-4 h-4 text-indigo-700" />
+                    <span>Search Hash Match with Lost Reports (&gt; 70%)</span>
+                  </motion.button>
+
+                  <motion.button
+                    whileHover={{ scale: 1.005 }}
+                    whileTap={{ scale: 0.985 }}
+                    type="submit"
+                    disabled={submittingFound}
+                    className="flex-1 py-3 px-4 bg-teal-700 hover:bg-teal-800 text-white font-semibold text-sm rounded-xl shadow-xs transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    <PlusCircle className="w-4 h-4" />
+                    {submittingFound
+                      ? 'Computing Hash & Publishing...'
+                      : 'Publish Unclaimed to Found Directory'}
+                  </motion.button>
+                </div>
               </div>
             </form>
           </div>
 
-          {/* Right Column: Live Perceptual Hash Preview & Automatic Lost Report Correlation */}
+          {/* Right Column: Live Perceptual Hash Preview & Interactive >70% Lost Report Claim Approval */}
           <div className="lg:col-span-5 space-y-5">
             <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-4">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <Fingerprint className="w-4 h-4 text-teal-600" />
-                Intake Hash & Anonymous Policy
-              </h3>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Fingerprint className="w-4 h-4 text-teal-600" />
+                  Intake Hash &amp; Lost Report Matcher
+                </h3>
+                <button
+                  type="button"
+                  onClick={handleSearchLostHashMatches}
+                  className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 transition-colors cursor-pointer"
+                >
+                  Scan Lost Reports
+                </button>
+              </div>
 
               {imageDataUrl ? (
                 <div className="space-y-3">
-                  <div className="h-44 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 relative">
+                  <div className="h-40 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 relative">
                     <img
                       src={imageDataUrl}
                       alt="Found Preview"
@@ -763,53 +927,162 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <div className="p-3 rounded-xl bg-slate-900 text-white flex items-center justify-between">
                     <span className="text-xs text-slate-400">Computed 64-Bit dHash:</span>
                     <span className="text-xs font-mono font-semibold text-teal-400 tracking-wider">
-                      {imageHash}
+                      0x{imageHash}
                     </span>
                   </div>
                 </div>
               ) : (
-                <div className="p-6 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-center">
-                  <Fingerprint className="w-7 h-7 text-slate-400 mx-auto mb-2" />
+                <div className="p-5 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-center space-y-2">
+                  <Fingerprint className="w-7 h-7 text-slate-400 mx-auto" />
                   <p className="text-xs font-medium text-slate-600">
-                    Upload a photo or select a hardware preset to preview its 64-bit perceptual signature.
+                    Upload a photo or select a hardware preset (e.g., <strong>14&quot; MacBook</strong> or <strong>Cognac Leather</strong>) to compute its 64-bit hash and match against student Lost Reports.
                   </p>
                 </div>
               )}
 
-              {/* Live Correlation with Student Lost Reports */}
-              <div className="pt-2 border-t border-slate-100">
-                <div className="text-xs font-semibold text-slate-800 mb-2 flex items-center justify-between">
-                  <span>Matching Student Lost Reports</span>
-                  <span className="text-[11px] font-mono text-slate-400">
-                    {lostReports.length} active lost reports
+              {/* Live Correlation with Student Lost Reports (> 70% Similarity) */}
+              <div className="pt-3 border-t border-slate-100 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-900">
+                    Student Lost Reports (&gt; 70% Hash Match)
+                  </span>
+                  <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                    {potentialLostMatches.length} of {lostReports.length} matched
                   </span>
                 </div>
+
                 {potentialLostMatches.length > 0 ? (
-                  <div className="space-y-2">
-                    {potentialLostMatches.map(({ item, similarity }) => (
-                      <div
-                        key={item.id}
-                        className="p-3 rounded-xl bg-teal-50/70 border border-teal-200 flex items-center justify-between gap-3"
-                      >
-                        <div className="min-w-0">
-                          <div className="text-xs font-bold text-slate-900 truncate">
-                            {item.title}
-                          </div>
-                          <div className="text-[11px] text-slate-600 truncate">
-                            Reported lost by {item.reporterName}
-                          </div>
+                  <div className="space-y-2.5">
+                    <p className="text-[11px] text-teal-800 bg-teal-50/80 border border-teal-200/80 rounded-lg px-2.5 py-1.5 font-medium">
+                      Tap a matched student below (&gt; 70% similarity) to directly approve their claim. The reported and found Item ID will unify and move straight to <strong>Resolved History</strong> with zero duplicates.
+                    </p>
+
+                    {potentialLostMatches.map(({ item, similarity }) => {
+                      const isSelected = selectedMatchedLostId === item.id;
+                      const isApproving = approvingMatchedLostId === item.id;
+
+                      return (
+                        <div
+                          key={item.id}
+                          className={`rounded-xl border transition-all overflow-hidden ${
+                            isSelected
+                              ? 'bg-emerald-50/70 border-emerald-400 shadow-xs'
+                              : 'bg-white border-teal-200 hover:border-teal-400'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSelectedMatchedLostId((prev) =>
+                                prev === item.id ? null : item.id
+                              )
+                            }
+                            className="w-full p-3 text-left flex items-center justify-between gap-3 cursor-pointer"
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <img
+                                src={item.imageDataUrl}
+                                alt={item.title}
+                                className="w-11 h-11 rounded-lg object-cover border border-slate-200 shrink-0"
+                              />
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-slate-900 truncate">
+                                  {item.reporterName}
+                                </div>
+                                <div className="text-[11px] font-medium text-slate-700 truncate">
+                                  Lost: {item.title}
+                                </div>
+                                <div className="text-[10px] font-mono text-slate-500 truncate">
+                                  ID: {item.id} • 0x{item.imageHash}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-col items-end gap-1 shrink-0">
+                              <span className="px-2 py-0.5 rounded-md text-xs font-mono font-bold bg-emerald-600 text-white tabular-nums">
+                                {similarity}% Match
+                              </span>
+                              <span className="text-[10px] font-semibold text-emerald-800">
+                                {isSelected ? 'Selected ▲' : 'Tap to Approve ▼'}
+                              </span>
+                            </div>
+                          </button>
+
+                          <AnimatePresence>
+                            {isSelected && (
+                              <motion.div
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                transition={{ duration: 0.16 }}
+                                className="px-3 pb-3 pt-2 border-t border-emerald-200/80 space-y-2.5 bg-white/90"
+                              >
+                                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200/80 text-[11px] space-y-1">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-semibold text-slate-700">
+                                      Unified Item ID (Lost = Found):
+                                    </span>
+                                    <span className="font-mono font-bold text-emerald-800 bg-emerald-100/80 px-1.5 py-0.5 rounded">
+                                      {item.id}
+                                    </span>
+                                  </div>
+                                  <div className="text-slate-600">
+                                    <strong>Reported Location:</strong> {item.location}
+                                  </div>
+                                  <div className="text-slate-600">
+                                    <strong>Student Proof:</strong> &ldquo;{item.description}&rdquo;
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                                    Admin Pickup &amp; Resolution Note
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={
+                                      directMatchNotesMap[item.id] ??
+                                      `Matched via 64-bit perceptual hash (${similarity}%) at ${dropLocation}. Approved for pickup with Student ID.`
+                                    }
+                                    onChange={(e) =>
+                                      setDirectMatchNotesMap((prev) => ({
+                                        ...prev,
+                                        [item.id]: e.target.value,
+                                      }))
+                                    }
+                                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg focus:border-emerald-600 focus:outline-none"
+                                  />
+                                </div>
+
+                                <motion.button
+                                  whileHover={{ scale: 1.01 }}
+                                  whileTap={{ scale: 0.98 }}
+                                  type="button"
+                                  disabled={isApproving}
+                                  onClick={() =>
+                                    handleDirectApproveMatchedLost(item, similarity)
+                                  }
+                                  className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold text-xs rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                                >
+                                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                                  <span>
+                                    {isApproving
+                                      ? 'Unifying Item ID & Moving to Resolved...'
+                                      : `Approve ${item.reporterName}'s Claim & Move to Resolved`}
+                                  </span>
+                                </motion.button>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
                         </div>
-                        <span className="px-2 py-1 rounded-md text-xs font-mono font-bold bg-teal-700 text-white shrink-0">
-                          {similarity}% match
-                        </span>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
-                  <p className="text-xs text-slate-500">
+                  <p className="text-xs text-slate-500 leading-relaxed">
                     {imageHash
-                      ? 'No high-similarity student lost reports matched yet. Publishing will list this item in the Found Directory.'
-                      : 'Generate an image hash above to automatically scan student lost reports.'}
+                      ? 'No active student lost reports exceed the 70% perceptual hash similarity threshold for this image. Publishing will list this item in the Found Directory.'
+                      : 'Click "Search Hash Match with Lost Reports (> 70%)" or select a hardware preset above to scan student lost reports.'}
                   </p>
                 )}
               </div>
@@ -1022,19 +1295,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                           <span className="truncate">{item.location}</span>
                         </p>
-                        <p className="text-[11px] text-slate-400 font-mono mt-1">
-                          dHash: {item.imageHash}
-                        </p>
+                        <div className="flex flex-wrap items-center gap-2 mt-1">
+                          <span className="text-[11px] text-slate-500 font-mono bg-slate-100 px-1.5 py-0.5 rounded">
+                            Unified Item ID: {item.id}
+                          </span>
+                          <span className="text-[11px] text-slate-400 font-mono">
+                            dHash: 0x{item.imageHash}
+                          </span>
+                        </div>
                       </div>
                     </div>
 
                     {associatedClaim && (
                       <div className="p-3 rounded-xl bg-emerald-50/60 border border-emerald-200/70 text-xs space-y-1">
-                        <div className="font-semibold text-emerald-950">
-                          Claimed by: {associatedClaim.claimantName}
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-emerald-950">
+                            Claimed by: {associatedClaim.claimantName}
+                          </span>
+                          <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-700 text-white">
+                            {associatedClaim.matchScore}% Hash Match • Linked ID: {associatedClaim.itemId}
+                          </span>
                         </div>
                         <div className="text-emerald-800">
-                          Proof: "{associatedClaim.proofDescription}"
+                          Proof: &ldquo;{associatedClaim.proofDescription}&rdquo;
                         </div>
                         {associatedClaim.adminNotes && (
                           <div className="text-[11px] text-emerald-700 font-medium pt-0.5">

@@ -198,11 +198,10 @@ service cloud.firestore {
         && isValidId(itemId)
         && isValidCampusItem(incoming())
         && incoming().id == itemId
-        && incoming().reporterId == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (
-          (incoming().type == 'lost' && incoming().status == 'approved') ||
+          (incoming().reporterId == request.auth.uid && incoming().type == 'lost' && incoming().status == 'approved') ||
           isAdmin()
         );
 
@@ -257,12 +256,17 @@ service cloud.firestore {
         && isValidId(claimId)
         && isValidItemClaim(incoming())
         && incoming().id == claimId
-        && incoming().claimantId == request.auth.uid
-        && incoming().status == 'pending'
-        && incoming().adminNotes == ''
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && exists(/databases/$(database)/documents/items/$(incoming().itemId));
+        && (
+          (
+            incoming().claimantId == request.auth.uid
+            && incoming().status == 'pending'
+            && incoming().adminNotes == ''
+            && exists(/databases/$(database)/documents/items/$(incoming().itemId))
+          )
+          || isAdmin()
+        );
 
       allow update: if isSignedIn()
         && isValidId(claimId)

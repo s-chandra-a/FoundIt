@@ -117,15 +117,27 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   }, [activeFoundItems, selectedCategory, searchQuery]);
 
   const myClaims = useMemo(() => {
-    return claims.filter((c) => c.claimantId === user.uid);
-  }, [claims, user.uid]);
+    return claims.filter(
+      (c) =>
+        c.claimantId === user.uid ||
+        c.claimantName.toLowerCase() === user.displayName.toLowerCase()
+    );
+  }, [claims, user.uid, user.displayName]);
 
   const myLostReports = useMemo(() => {
-    return items.filter((i) => i.reporterId === user.uid && i.type === 'lost');
-  }, [items, user.uid]);
+    return items.filter(
+      (i) =>
+        i.type === 'lost' &&
+        i.status !== 'resolved' &&
+        (i.reporterId === user.uid ||
+          i.reporterName.toLowerCase() === user.displayName.toLowerCase())
+    );
+  }, [items, user.uid, user.displayName]);
 
   const lostReportsOnCampus = useMemo(() => {
-    return items.filter((i) => i.type === 'lost' && i.status !== 'rejected');
+    return items.filter(
+      (i) => i.type === 'lost' && i.status !== 'rejected' && i.status !== 'resolved'
+    );
   }, [items]);
 
   const handleCopyHash = (id: string, hashHex: string) => {
@@ -322,6 +334,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   };
 
   const handleOpenClaimModal = (item: CampusItem, matchScore = 0) => {
+    const existingClaim = myClaims.find((c) => c.itemId === item.id);
+    if (existingClaim) {
+      onNotify(
+        'Claim Already Submitted',
+        `You already have a ${existingClaim.status} claim for "${item.title}".`,
+        'info'
+      );
+      setActiveTab('my_claims');
+      return;
+    }
     setClaimingItem(item);
     setClaimMatchScore(matchScore);
     setProofText('');
@@ -883,13 +905,23 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                                 </p>
                               </div>
 
-                              <button
-                                type="button"
-                                onClick={() => handleOpenClaimModal(item, metrics.matchPercentage)}
-                                className="px-3.5 py-2 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] active:scale-95 rounded-lg shadow-xs transition-all whitespace-nowrap shrink-0 cursor-pointer"
-                              >
-                                Claim with {metrics.matchPercentage}% Match
-                              </button>
+                              {myClaims.some((c) => c.itemId === item.id) ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setActiveTab('my_claims')}
+                                  className="px-3.5 py-2 text-xs font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer"
+                                >
+                                  View My Claim →
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenClaimModal(item, metrics.matchPercentage)}
+                                  className="px-3.5 py-2 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] active:scale-95 rounded-lg shadow-xs transition-all whitespace-nowrap shrink-0 cursor-pointer"
+                                >
+                                  Claim with {metrics.matchPercentage}% Match
+                                </button>
+                              )}
                             </div>
                           </motion.div>
                         );

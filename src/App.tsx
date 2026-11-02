@@ -49,13 +49,18 @@ import {
   UserRole,
 } from './types';
 import { buildInitialCampusItems, buildInitialSampleClaims } from './utils/seedData';
+import { comparePerceptualHashes } from './utils/imageHash';
 import { LandingPage } from './components/LandingPage';
 import { AuthModal } from './components/AuthModal';
 import { StudentDashboard, StudentTab } from './components/StudentDashboard';
-import { AdminDashboard, AdminTab } from './components/AdminDashboard';
+import {
+  AdminDashboard,
+  AdminTab,
+  ResolvedMatchedFoundDetails,
+} from './components/AdminDashboard';
 
-const LOCAL_ITEMS_KEY = 'foundit_campus_items_v2';
-const LOCAL_CLAIMS_KEY = 'foundit_campus_claims_v2';
+const LOCAL_ITEMS_KEY = 'foundit_campus_items_v3';
+const LOCAL_CLAIMS_KEY = 'foundit_campus_claims_v3';
 
 export default function App() {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
@@ -188,6 +193,14 @@ export default function App() {
     if (userProfile.isLocalDemoSession) {
       let mounted = true;
       (async () => {
+        const hasLegacySeedDuplicates = (list: CampusItem[]) =>
+          list.some(
+            (i) =>
+              i.id === 'item_macbook_101' ||
+              i.id === 'item_lost_macbook_201' ||
+              (i.type === 'lost' && i.reporterName.toLowerCase().includes('admin'))
+          );
+
         // Check server or localStorage first so changes persist across Student <-> Admin switches
         try {
           const res = await fetch('/api/state');
@@ -196,6 +209,7 @@ export default function App() {
             if (
               Array.isArray(data.items) &&
               data.items.length > 0 &&
+              !hasLegacySeedDuplicates(data.items) &&
               mounted
             ) {
               setItems(data.items);
@@ -215,7 +229,11 @@ export default function App() {
             const parsedClaims = savedClaimsRaw
               ? (JSON.parse(savedClaimsRaw) as ItemClaim[])
               : [];
-            if (parsedItems.length > 0 && mounted) {
+            if (
+              parsedItems.length > 0 &&
+              !hasLegacySeedDuplicates(parsedItems) &&
+              mounted
+            ) {
               setItems(parsedItems);
               setClaims(parsedClaims);
               return;
@@ -227,11 +245,13 @@ export default function App() {
 
         const initialItems = await buildInitialCampusItems(
           userProfile.uid,
-          userProfile.displayName
+          userProfile.displayName,
+          userProfile.role
         );
         const initialClaims = buildInitialSampleClaims(
           userProfile.uid,
-          'Alex Rivera'
+          userProfile.displayName,
+          userProfile.role
         );
         if (!mounted) return;
         setItems(initialItems);
@@ -256,13 +276,29 @@ export default function App() {
         );
         setItems(fetchedItems);
 
-        if (fetchedItems.length === 0 && !hasSeededOnce) {
+        const needsLegacyCleanup = fetchedItems.some(
+          (i) =>
+            i.id === 'item_macbook_101' ||
+            i.id === 'item_lost_macbook_201' ||
+            (i.type === 'lost' && i.reporterName.toLowerCase().includes('admin'))
+        );
+
+        if ((fetchedItems.length === 0 || needsLegacyCleanup) && !hasSeededOnce) {
           setHasSeededOnce(true);
           try {
             const seedItems = await buildInitialCampusItems(
               userProfile.uid,
-              userProfile.displayName
+              userProfile.displayName,
+              userProfile.role
             );
+            const seedIds = new Set(seedItems.map((s) => s.id));
+            if (needsLegacyCleanup && userProfile.role === 'admin') {
+              for (const oldItem of fetchedItems) {
+                if (!seedIds.has(oldItem.id)) {
+                  await deleteDoc(doc(db, 'items', oldItem.id));
+                }
+              }
+            }
             for (const item of seedItems) {
               await setDoc(doc(db, 'items', item.id), {
                 ...item,
@@ -272,7 +308,8 @@ export default function App() {
             }
             const seedClaims = buildInitialSampleClaims(
               userProfile.uid,
-              'Alex Rivera'
+              userProfile.displayName,
+              userProfile.role
             );
             for (const clm of seedClaims) {
               await setDoc(doc(db, 'claims', clm.id), {
@@ -291,13 +328,10 @@ export default function App() {
       }
     );
 
-    const claimsQuery =
-      userProfile.role === 'admin'
-        ? query(collection(db, 'claims'), where('visibility', '==', 'campus'))
-        : query(
-            collection(db, 'claims'),
-            where('claimantId', '==', userProfile.uid)
-          );
+    const claimsQuery = query(
+      collection(db, 'claims'),
+      where('visibility', '==', 'campus')
+    );
 
     const unsubClaims = onSnapshot(
       claimsQuery,
@@ -426,7 +460,9 @@ export default function App() {
 
     if (userProfile.isLocalDemoSession) {
       const nextItems = items.map((it) =>
-        it.id === itemId ? { ...it, status: 'approved' as ItemStatus } : it
+        it.id === itemId
+          ? { ...it, type: 'found' as const, status: 'approved' as ItemStatus }
+          : it
       );
       const nextClaims = claims.map((c) =>
         c.itemId === itemId && c.status === 'approved'
@@ -446,6 +482,7 @@ export default function App() {
     const itemPath = `items/${itemId}`;
     try {
       await updateDoc(doc(db, 'items', itemId), {
+        type: 'found',
         status: 'approved',
         updatedAt: serverTimestamp(),
       });
@@ -462,19 +499,147 @@ export default function App() {
     }
   };
 
+  // Directly unify a found drop-off with a matched student Lost Report (>70% hash similarity),
+  // approve the student's claim under the single unified Item ID, remove duplicates, and move to Resolved History
+  const handleResolveMatchedLostReport = async (
+    lostItem: CampusItem,
+    foundDetails: ResolvedMatchedFoundDetails
+  ) => {
+    if (!userProfile) return;
+
+    const unifiedItemId = lostItem.id;
+    const nowIso = new Date().toISOString();
+
+    const unifiedLocation =
+      `${foundDetails.dropLocation} (Matched Lost Report: ${lostItem.location})`.slice(
+        0,
+        120
+      );
+    const unifiedDescription =
+      `${foundDetails.description} | Matched Student Report (${lostItem.reporterName}): ${lostItem.description}`.slice(
+        0,
+        1000
+      );
+
+    // Find any duplicate open items with the same title or >85% hash similarity so 0 duplicates exist
+    const duplicateItemIds = items
+      .filter(
+        (other) =>
+          other.id !== unifiedItemId &&
+          other.status !== 'resolved' &&
+          (other.title.toLowerCase() === foundDetails.title.toLowerCase() ||
+            other.title.toLowerCase() === lostItem.title.toLowerCase() ||
+            comparePerceptualHashes(foundDetails.imageHash, other.imageHash)
+              .matchPercentage >= 85)
+      )
+      .map((d) => d.id);
+
+    const unifiedClaimId = `claim_resolved_${unifiedItemId}`;
+    const unifiedClaimBase: Omit<ItemClaim, 'createdAt' | 'updatedAt'> = {
+      id: unifiedClaimId,
+      itemId: unifiedItemId,
+      itemTitle: (foundDetails.title || lostItem.title).slice(0, 120),
+      claimantId: lostItem.reporterId,
+      claimantName: lostItem.reporterName.slice(0, 100),
+      proofDescription:
+        `Reported Lost at ${lostItem.location}: "${lostItem.description}"`.slice(
+          0,
+          1000
+        ),
+      matchScore: foundDetails.similarity,
+      status: 'approved',
+      adminNotes: foundDetails.adminNotes.slice(0, 500),
+      visibility: 'campus',
+    };
+
+    if (userProfile.isLocalDemoSession) {
+      const nextItems = items
+        .filter((it) => !duplicateItemIds.includes(it.id))
+        .map((it) =>
+          it.id === unifiedItemId
+            ? {
+                ...it,
+                type: 'found' as const,
+                title: (foundDetails.title || lostItem.title).slice(0, 120),
+                category: foundDetails.category,
+                location: unifiedLocation,
+                dateOccurred: foundDetails.dateOccurred,
+                description: unifiedDescription,
+                imageDataUrl: foundDetails.imageDataUrl,
+                imageHash: foundDetails.imageHash,
+                status: 'resolved' as ItemStatus,
+                updatedAt: nowIso,
+              }
+            : it
+        );
+
+      const otherClaims = claims.filter(
+        (c) => c.id !== unifiedClaimId && !duplicateItemIds.includes(c.itemId)
+      );
+      const nextClaims: ItemClaim[] = [
+        {
+          ...unifiedClaimBase,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        },
+        ...otherClaims,
+      ];
+
+      setItems(nextItems);
+      setClaims(nextClaims);
+      await persistStateSnapshot(nextItems, nextClaims);
+      return;
+    }
+
+    const itemPath = `items/${unifiedItemId}`;
+    try {
+      await updateDoc(doc(db, 'items', unifiedItemId), {
+        type: 'found',
+        title: (foundDetails.title || lostItem.title).slice(0, 120),
+        category: foundDetails.category,
+        location: unifiedLocation,
+        dateOccurred: foundDetails.dateOccurred,
+        description: unifiedDescription,
+        imageDataUrl: foundDetails.imageDataUrl,
+        imageHash: foundDetails.imageHash,
+        status: 'resolved',
+        updatedAt: serverTimestamp(),
+      });
+
+      for (const dupId of duplicateItemIds) {
+        await deleteDoc(doc(db, 'items', dupId));
+      }
+
+      await setDoc(doc(db, 'claims', unifiedClaimId), {
+        ...unifiedClaimBase,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, itemPath);
+    }
+  };
+
   const handleDeleteItem = async (itemId: string) => {
     if (!userProfile) return;
 
+    const orphanedClaims = claims.filter((c) => c.itemId === itemId);
+
     if (userProfile.isLocalDemoSession) {
       const nextItems = items.filter((it) => it.id !== itemId);
+      const nextClaims = claims.filter((c) => c.itemId !== itemId);
       setItems(nextItems);
-      await persistStateSnapshot(nextItems, claims);
+      setClaims(nextClaims);
+      await persistStateSnapshot(nextItems, nextClaims);
       return;
     }
 
     const path = `items/${itemId}`;
     try {
       await deleteDoc(doc(db, 'items', itemId));
+      for (const clm of orphanedClaims) {
+        await deleteDoc(doc(db, 'claims', clm.id));
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, path);
     }
@@ -488,16 +653,51 @@ export default function App() {
   ) => {
     if (!userProfile) return;
 
-    if (userProfile.isLocalDemoSession) {
-      const nextClaims = claims.map((c) =>
-        c.id === claimId ? { ...c, status, adminNotes } : c
-      );
-      const nextItems =
-        status === 'approved'
-          ? items.map((it) =>
-              it.id === itemId ? { ...it, status: 'resolved' as ItemStatus } : it
+    const targetItem = items.find((i) => i.id === itemId);
+    const duplicateLostIds =
+      status === 'approved' && targetItem
+        ? items
+            .filter(
+              (other) =>
+                other.id !== itemId &&
+                other.type === 'lost' &&
+                other.status !== 'resolved' &&
+                comparePerceptualHashes(targetItem.imageHash, other.imageHash)
+                  .matchPercentage > 70
             )
-          : items;
+            .map((d) => d.id)
+        : [];
+
+    const otherPendingClaimsOnItem = claims.filter(
+      (c) => c.itemId === itemId && c.id !== claimId && c.status === 'pending'
+    );
+
+    if (userProfile.isLocalDemoSession) {
+      const nextClaims = claims.map((c) => {
+        if (c.id === claimId) return { ...c, status, adminNotes };
+        if (status === 'approved' && c.itemId === itemId && c.status === 'pending') {
+          return {
+            ...c,
+            status: 'rejected' as ClaimStatus,
+            adminNotes: 'Item ownership verified and resolved with another claimant.',
+          };
+        }
+        return c;
+      });
+
+      const nextItems = items
+        .filter((it) => !duplicateLostIds.includes(it.id))
+        .map((it) => {
+          if (it.id !== itemId) return it;
+          if (status === 'approved') {
+            return { ...it, type: 'found' as const, status: 'resolved' as ItemStatus };
+          }
+          if (status === 'rejected' && otherPendingClaimsOnItem.length === 0 && it.status === 'claimed') {
+            return { ...it, status: 'approved' as ItemStatus };
+          }
+          return it;
+        });
+
       setClaims(nextClaims);
       setItems(nextItems);
       await persistStateSnapshot(nextItems, nextClaims);
@@ -513,10 +713,31 @@ export default function App() {
       });
 
       if (status === 'approved') {
-        const itemExists = items.some((i) => i.id === itemId);
-        if (itemExists) {
+        if (targetItem) {
           await updateDoc(doc(db, 'items', itemId), {
+            type: 'found',
             status: 'resolved',
+            updatedAt: serverTimestamp(),
+          });
+        }
+        for (const dupId of duplicateLostIds) {
+          await deleteDoc(doc(db, 'items', dupId));
+        }
+        for (const otherClaim of otherPendingClaimsOnItem) {
+          await updateDoc(doc(db, 'claims', otherClaim.id), {
+            status: 'rejected',
+            adminNotes: 'Item ownership verified and resolved with another claimant.',
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } else if (status === 'rejected') {
+        if (
+          targetItem &&
+          targetItem.status === 'claimed' &&
+          otherPendingClaimsOnItem.length === 0
+        ) {
+          await updateDoc(doc(db, 'items', itemId), {
+            status: 'approved',
             updatedAt: serverTimestamp(),
           });
         }
@@ -548,11 +769,13 @@ export default function App() {
     if (!userProfile) return;
     const seedItems = await buildInitialCampusItems(
       userProfile.uid,
-      userProfile.displayName
+      userProfile.displayName,
+      userProfile.role
     );
     const seedClaims = buildInitialSampleClaims(
       userProfile.uid,
-      'Alex Rivera'
+      userProfile.displayName,
+      userProfile.role
     );
 
     if (userProfile.isLocalDemoSession) {
@@ -560,6 +783,29 @@ export default function App() {
       setClaims(seedClaims);
       await persistStateSnapshot(seedItems, seedClaims);
       return;
+    }
+
+    const seedItemIds = new Set(seedItems.map((i) => i.id));
+    const seedClaimIds = new Set(seedClaims.map((c) => c.id));
+
+    // Clean up any stale or duplicate items/claims before writing canonical seed records
+    for (const existingItem of items) {
+      if (!seedItemIds.has(existingItem.id)) {
+        try {
+          await deleteDoc(doc(db, 'items', existingItem.id));
+        } catch {
+          // Ignore if non-admin or already removed
+        }
+      }
+    }
+    for (const existingClaim of claims) {
+      if (!seedClaimIds.has(existingClaim.id)) {
+        try {
+          await deleteDoc(doc(db, 'claims', existingClaim.id));
+        } catch {
+          // Ignore if non-admin or already removed
+        }
+      }
     }
 
     for (const item of seedItems) {
@@ -645,7 +891,11 @@ export default function App() {
       id: 'my_claims',
       label: 'My Claims & Status',
       icon: FolderCheck,
-      badge: claims.filter((c) => c.claimantId === userProfile.uid).length,
+      badge: claims.filter(
+        (c) =>
+          c.claimantId === userProfile.uid ||
+          c.claimantName.toLowerCase() === userProfile.displayName.toLowerCase()
+      ).length,
     },
   ];
 
@@ -953,6 +1203,7 @@ export default function App() {
               items={items}
               claims={claims}
               onCreateItem={handleCreateItem}
+              onResolveMatchedLostReport={handleResolveMatchedLostReport}
               onUpdateItemStatus={handleUpdateItemStatus}
               onUnresolveItem={handleUnresolveItem}
               onDeleteItem={handleDeleteItem}
