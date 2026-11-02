@@ -1,0 +1,291 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isRuntimeBootstrappedAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'soukaryo.here@gmail.com';
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        || isRuntimeBootstrappedAdmin()
+      );
+    }
+
+    // Entity Validation Helpers (Blueprint-Synchronized)
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'department', 'studentId', 'role', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'department', 'studentId', 'role', 'createdAt'])
+        && data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 120
+        && data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 80
+        && data.department is string && data.department.size() >= 2 && data.department.size() <= 80
+        && data.studentId is string && data.studentId.size() >= 2 && data.studentId.size() <= 40
+        && data.role is string && (data.role == 'student' || data.role == 'admin')
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'grantedAt', 'bootstrapKey'])
+        && data.keys().hasOnly(['uid', 'grantedAt', 'bootstrapKey'])
+        && data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.grantedAt is timestamp
+        && data.bootstrapKey is string && data.bootstrapKey.size() >= 10 && data.bootstrapKey.size() <= 64;
+    }
+
+    function isValidCampusItem(data) {
+      return data.keys().hasAll([
+          'id', 'type', 'title', 'category', 'location', 'dateOccurred',
+          'description', 'imageDataUrl', 'imageHash', 'status',
+          'reporterId', 'reporterName', 'visibility', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'type', 'title', 'category', 'location', 'dateOccurred',
+          'description', 'imageDataUrl', 'imageHash', 'status',
+          'reporterId', 'reporterName', 'visibility', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.type is string && (data.type == 'found' || data.type == 'lost')
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 120
+        && data.category is string && (
+          data.category == 'Electronics' ||
+          data.category == 'ID & Keys' ||
+          data.category == 'Accessories' ||
+          data.category == 'Books & Notes' ||
+          data.category == 'Apparel' ||
+          data.category == 'Bottles & Gear' ||
+          data.category == 'Other'
+        )
+        && data.location is string && data.location.size() >= 2 && data.location.size() <= 120
+        && data.dateOccurred is string && data.dateOccurred.size() >= 4 && data.dateOccurred.size() <= 40
+        && data.description is string && data.description.size() >= 4 && data.description.size() <= 1000
+        && data.imageDataUrl is string && data.imageDataUrl.size() >= 10 && data.imageDataUrl.size() <= 150000
+        && data.imageHash is string && data.imageHash.size() >= 16 && data.imageHash.size() <= 64 && data.imageHash.matches('^[0-9a-fA-F]+$')
+        && data.status is string && (
+          data.status == 'pending_approval' ||
+          data.status == 'approved' ||
+          data.status == 'claimed' ||
+          data.status == 'resolved' ||
+          data.status == 'rejected'
+        )
+        && data.reporterId is string && data.reporterId.size() >= 1 && data.reporterId.size() <= 128 && data.reporterId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.reporterName is string && data.reporterName.size() >= 1 && data.reporterName.size() <= 100
+        && data.visibility is string && data.visibility == 'campus'
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidItemClaim(data) {
+      return data.keys().hasAll([
+          'id', 'itemId', 'itemTitle', 'claimantId', 'claimantName',
+          'proofDescription', 'matchScore', 'status', 'adminNotes',
+          'visibility', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'itemId', 'itemTitle', 'claimantId', 'claimantName',
+          'proofDescription', 'matchScore', 'status', 'adminNotes',
+          'visibility', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.itemId is string && data.itemId.size() >= 1 && data.itemId.size() <= 128 && data.itemId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.itemTitle is string && data.itemTitle.size() >= 2 && data.itemTitle.size() <= 120
+        && data.claimantId is string && data.claimantId.size() >= 1 && data.claimantId.size() <= 128 && data.claimantId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.claimantName is string && data.claimantName.size() >= 1 && data.claimantName.size() <= 100
+        && data.proofDescription is string && data.proofDescription.size() >= 5 && data.proofDescription.size() <= 1000
+        && data.matchScore is number && data.matchScore >= 0 && data.matchScore <= 100
+        && data.status is string && (
+          data.status == 'pending' ||
+          data.status == 'approved' ||
+          data.status == 'rejected'
+        )
+        && data.adminNotes is string && data.adminNotes.size() <= 500
+        && data.visibility is string && data.visibility == 'campus'
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // 1. User Profiles (PII Isolated to Owner & Admin; No list queries allowed)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if false;
+
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().createdAt == request.time
+        && (incoming().role == 'student' || isAdmin());
+
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && incoming().uid == existing().uid
+        && (
+          (
+            isOwner(userId)
+            && incoming().createdAt == existing().createdAt
+            && incoming().role == existing().role
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'department', 'studentId'])
+          )
+          || isAdmin()
+        );
+
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // 2. Trusted Administrator Registry (No list queries allowed)
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if false;
+
+      allow create: if isSignedIn()
+        && isValidId(adminId)
+        && isOwner(adminId)
+        && isValidAdminRecord(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().grantedAt == request.time
+        && (incoming().bootstrapKey == 'FOUNDIT_CAMPUS_ADMIN_2026' || isAdmin());
+
+      allow update: if false;
+      allow delete: if isValidId(adminId) && isAdmin();
+    }
+
+    // 3. Campus Directory Items (Found & Lost)
+    match /items/{itemId} {
+      allow get: if isSignedIn() && isValidId(itemId) && (
+        existing().visibility == 'campus' ||
+        existing().reporterId == request.auth.uid ||
+        isAdmin()
+      );
+
+      allow list: if isSignedIn() && (
+        existing().visibility == 'campus' ||
+        existing().reporterId == request.auth.uid
+      );
+
+      allow create: if isSignedIn()
+        && isValidId(itemId)
+        && isValidCampusItem(incoming())
+        && incoming().id == itemId
+        && incoming().reporterId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (incoming().type == 'lost' && incoming().status == 'approved') ||
+          isAdmin()
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(itemId)
+        && isValidCampusItem(incoming())
+        && incoming().id == existing().id
+        && (
+          // Action 1: Reporter updates details while not in terminal state
+          (
+            incoming().reporterId == existing().reporterId
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
+            && existing().reporterId == request.auth.uid
+            && existing().status != 'resolved'
+            && existing().status != 'rejected'
+            && incoming().status == existing().status
+            && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'location', 'description', 'updatedAt'])
+          )
+          // Action 2: Student marks item as claimed when submitting a claim
+          || (
+            incoming().reporterId == existing().reporterId
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
+            && existing().status == 'approved'
+            && incoming().status == 'claimed'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+          // Action 3: Admin full moderation escape hatch (approve, resolve, unresolve, re-seed)
+          || isAdmin()
+        );
+
+      allow delete: if isSignedIn() && isValidId(itemId) && (
+        isAdmin() ||
+        (existing().reporterId == request.auth.uid && existing().type == 'lost')
+      );
+    }
+
+    // 4. Item Ownership Claims
+    match /claims/{claimId} {
+      allow get: if isSignedIn() && isValidId(claimId) && (
+        existing().claimantId == request.auth.uid ||
+        isAdmin()
+      );
+
+      allow list: if isSignedIn() && (
+        existing().claimantId == request.auth.uid ||
+        existing().visibility == 'campus'
+      );
+
+      allow create: if isSignedIn()
+        && isValidId(claimId)
+        && isValidItemClaim(incoming())
+        && incoming().id == claimId
+        && incoming().claimantId == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().adminNotes == ''
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/items/$(incoming().itemId));
+
+      allow update: if isSignedIn()
+        && isValidId(claimId)
+        && isValidItemClaim(incoming())
+        && incoming().id == existing().id
+        && (
+          // Action 1: Claimant updates proof while claim is still pending
+          (
+            incoming().itemId == existing().itemId
+            && incoming().claimantId == existing().claimantId
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
+            && existing().claimantId == request.auth.uid
+            && existing().status == 'pending'
+            && incoming().status == 'pending'
+            && incoming().adminNotes == existing().adminNotes
+            && incoming().diff(existing()).affectedKeys().hasOnly(['proofDescription', 'updatedAt'])
+          )
+          // Action 2: Admin moderates claim status and notes (approve, reject, unresolve)
+          || isAdmin()
+        );
+
+      allow delete: if isSignedIn() && isValidId(claimId) && isAdmin();
+    }
+  }
+}

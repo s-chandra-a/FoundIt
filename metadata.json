@@ -1,0 +1,6 @@
+{
+  "name": "FoundIt",
+  "description": "Campus lost and found directory featuring perceptual image hash search, student claim tracking, and administrative moderation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
