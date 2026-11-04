@@ -499,7 +499,7 @@ export default function App() {
     }
   };
 
-  // Directly unify a found drop-off with a matched student Lost Report (>70% hash similarity),
+  // Directly unify a found drop-off (or existing found item) with a matched student Lost Report (>70% hash similarity),
   // approve the student's claim under the single unified Item ID, remove duplicates, and move to Resolved History
   const handleResolveMatchedLostReport = async (
     lostItem: CampusItem,
@@ -521,18 +521,26 @@ export default function App() {
         1000
       );
 
-    // Find any duplicate open items with the same title or >85% hash similarity so 0 duplicates exist
-    const duplicateItemIds = items
-      .filter(
-        (other) =>
-          other.id !== unifiedItemId &&
-          other.status !== 'resolved' &&
-          (other.title.toLowerCase() === foundDetails.title.toLowerCase() ||
-            other.title.toLowerCase() === lostItem.title.toLowerCase() ||
-            comparePerceptualHashes(foundDetails.imageHash, other.imageHash)
-              .matchPercentage >= 85)
-      )
-      .map((d) => d.id);
+    // Find any duplicate open items (including existingFoundItemId or >70% hash similarity) so 0 duplicates exist
+    const duplicateItemIds = Array.from(
+      new Set([
+        ...(foundDetails.existingFoundItemId &&
+        foundDetails.existingFoundItemId !== unifiedItemId
+          ? [foundDetails.existingFoundItemId]
+          : []),
+        ...items
+          .filter(
+            (other) =>
+              other.id !== unifiedItemId &&
+              other.status !== 'resolved' &&
+              (other.title.toLowerCase() === foundDetails.title.toLowerCase() ||
+                other.title.toLowerCase() === lostItem.title.toLowerCase() ||
+                comparePerceptualHashes(foundDetails.imageHash, other.imageHash)
+                  .matchPercentage > 70)
+          )
+          .map((d) => d.id),
+      ])
+    );
 
     const unifiedClaimId = `claim_resolved_${unifiedItemId}`;
     const unifiedClaimBase: Omit<ItemClaim, 'createdAt' | 'updatedAt'> = {
@@ -550,6 +558,8 @@ export default function App() {
       status: 'approved',
       adminNotes: foundDetails.adminNotes.slice(0, 500),
       visibility: 'campus',
+      linkedLostItemId: unifiedItemId,
+      linkedLostItemTitle: lostItem.title.slice(0, 120),
     };
 
     if (userProfile.isLocalDemoSession) {
@@ -649,33 +659,70 @@ export default function App() {
     claimId: string,
     itemId: string,
     status: ClaimStatus,
-    adminNotes: string
+    adminNotes: string,
+    linkedLostItemId?: string
   ) => {
     if (!userProfile) return;
 
     const targetItem = items.find((i) => i.id === itemId);
+    const targetClaim = claims.find((c) => c.id === claimId);
+    const explicitLostId = linkedLostItemId || targetClaim?.linkedLostItemId;
+    const coResolvedLostItem = explicitLostId
+      ? items.find((i) => i.id === explicitLostId)
+      : undefined;
+
     const duplicateLostIds =
-      status === 'approved' && targetItem
-        ? items
-            .filter(
-              (other) =>
-                other.id !== itemId &&
-                other.type === 'lost' &&
-                other.status !== 'resolved' &&
-                comparePerceptualHashes(targetItem.imageHash, other.imageHash)
-                  .matchPercentage > 70
-            )
-            .map((d) => d.id)
+      status === 'approved'
+        ? Array.from(
+            new Set([
+              ...(explicitLostId && explicitLostId !== itemId
+                ? [explicitLostId]
+                : []),
+              ...(targetItem
+                ? items
+                    .filter(
+                      (other) =>
+                        other.id !== itemId &&
+                        other.type === 'lost' &&
+                        other.status !== 'resolved' &&
+                        comparePerceptualHashes(
+                          targetItem.imageHash,
+                          other.imageHash
+                        ).matchPercentage > 70
+                    )
+                    .map((d) => d.id)
+                : []),
+            ])
+          )
         : [];
 
     const otherPendingClaimsOnItem = claims.filter(
-      (c) => c.itemId === itemId && c.id !== claimId && c.status === 'pending'
+      (c) =>
+        (c.itemId === itemId || duplicateLostIds.includes(c.itemId)) &&
+        c.id !== claimId &&
+        c.status === 'pending'
     );
 
     if (userProfile.isLocalDemoSession) {
       const nextClaims = claims.map((c) => {
-        if (c.id === claimId) return { ...c, status, adminNotes };
-        if (status === 'approved' && c.itemId === itemId && c.status === 'pending') {
+        if (c.id === claimId) {
+          return {
+            ...c,
+            status,
+            adminNotes,
+            ...(coResolvedLostItem
+              ? {
+                  linkedLostItemId: coResolvedLostItem.id,
+                  linkedLostItemTitle: coResolvedLostItem.title.slice(0, 120),
+                }
+              : {}),
+          };
+        }
+        if (
+          status === 'approved' &&
+          (c.itemId === itemId || duplicateLostIds.includes(c.itemId)) &&
+          c.status === 'pending'
+        ) {
           return {
             ...c,
             status: 'rejected' as ClaimStatus,
@@ -690,9 +737,23 @@ export default function App() {
         .map((it) => {
           if (it.id !== itemId) return it;
           if (status === 'approved') {
-            return { ...it, type: 'found' as const, status: 'resolved' as ItemStatus };
+            return {
+              ...it,
+              type: 'found' as const,
+              status: 'resolved' as ItemStatus,
+              description: coResolvedLostItem
+                ? `${it.description} | Co-Resolved Student Lost Report (${coResolvedLostItem.id}): ${coResolvedLostItem.description}`.slice(
+                    0,
+                    1000
+                  )
+                : it.description,
+            };
           }
-          if (status === 'rejected' && otherPendingClaimsOnItem.length === 0 && it.status === 'claimed') {
+          if (
+            status === 'rejected' &&
+            otherPendingClaimsOnItem.length === 0 &&
+            it.status === 'claimed'
+          ) {
             return { ...it, status: 'approved' as ItemStatus };
           }
           return it;
@@ -709,6 +770,12 @@ export default function App() {
       await updateDoc(doc(db, 'claims', claimId), {
         status,
         adminNotes,
+        ...(coResolvedLostItem
+          ? {
+              linkedLostItemId: coResolvedLostItem.id,
+              linkedLostItemTitle: coResolvedLostItem.title.slice(0, 120),
+            }
+          : {}),
         updatedAt: serverTimestamp(),
       });
 
@@ -717,6 +784,15 @@ export default function App() {
           await updateDoc(doc(db, 'items', itemId), {
             type: 'found',
             status: 'resolved',
+            ...(coResolvedLostItem
+              ? {
+                  description:
+                    `${targetItem.description} | Co-Resolved Student Lost Report (${coResolvedLostItem.id}): ${coResolvedLostItem.description}`.slice(
+                      0,
+                      1000
+                    ),
+                }
+              : {}),
             updatedAt: serverTimestamp(),
           });
         }

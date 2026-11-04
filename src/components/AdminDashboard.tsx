@@ -49,6 +49,7 @@ export interface ResolvedMatchedFoundDetails {
   imageHash: string;
   similarity: number;
   adminNotes: string;
+  existingFoundItemId?: string;
 }
 
 interface AdminDashboardProps {
@@ -65,7 +66,13 @@ interface AdminDashboardProps {
   onUpdateItemStatus: (itemId: string, status: ItemStatus) => Promise<void>;
   onUnresolveItem: (itemId: string) => Promise<void>;
   onDeleteItem: (itemId: string) => Promise<void>;
-  onModerateClaim: (claimId: string, itemId: string, status: ClaimStatus, adminNotes: string) => Promise<void>;
+  onModerateClaim: (
+    claimId: string,
+    itemId: string,
+    status: ClaimStatus,
+    adminNotes: string,
+    linkedLostItemId?: string
+  ) => Promise<void>;
   onDeleteClaim: (claimId: string) => Promise<void>;
   onSeedDatabase: () => Promise<void>;
   onNotify: (title: string, message: string, variant?: 'success' | 'info' | 'warning') => void;
@@ -90,6 +97,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [dbFilter, setDbFilter] = useState<'all' | 'found' | 'lost'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [adminNotesMap, setAdminNotesMap] = useState<Record<string, string>>({});
+  const [claimLinkedLostIdMap, setClaimLinkedLostIdMap] = useState<Record<string, string>>({});
+  const [claimShowAllLostMap, setClaimShowAllLostMap] = useState<Record<string, boolean>>({});
+  const [claimHashScannedMap, setClaimHashScannedMap] = useState<Record<string, boolean>>({});
   const [seeding, setSeeding] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
   const [processingId, setProcessingId] = useState<string | null>(null);
@@ -110,6 +120,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [imageDataUrl, setImageDataUrl] = useState('');
   const [imageHash, setImageHash] = useState('');
   const [selectedPresetKey, setSelectedPresetKey] = useState<string>(PRESET_CAMPUS_VISUALS[0].key);
+  const [selectedExistingFoundId, setSelectedExistingFoundId] = useState<string>('');
   const [submittingFound, setSubmittingFound] = useState(false);
   const [selectedMatchedLostId, setSelectedMatchedLostId] = useState<string | null>(null);
   const [directMatchNotesMap, setDirectMatchNotesMap] = useState<Record<string, string>>({});
@@ -324,6 +335,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         imageHash: finalHash,
         similarity,
         adminNotes,
+        ...(selectedExistingFoundId
+          ? { existingFoundItemId: selectedExistingFoundId }
+          : {}),
       });
 
       setTitle('');
@@ -331,15 +345,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setDescription('');
       setImageDataUrl('');
       setImageHash('');
+      setSelectedExistingFoundId('');
       setSelectedMatchedLostId(null);
 
       triggerBanner(
-        `Approved ${matchedLostItem.reporterName}'s claim (${similarity}% hash match)! Unified Item ID "${matchedLostItem.id}" moved out of active directories into Resolved History with zero duplicates.`,
+        `Approved ${matchedLostItem.reporterName}'s claim (${similarity}% hash match)! Both the Found item and Student Lost Report ("${matchedLostItem.id}") are now resolved and moved to Resolved History with zero duplicates.`,
         'success',
         'resolved_history'
       );
       onNotify(
-        'Student Claim Approved & Unified in Resolved History',
+        'Both Found & Student Lost Item Resolved',
         `Matched item (${matchedLostItem.id}) for ${matchedLostItem.reporterName} moved directly to Resolved History.`,
         'success'
       );
@@ -406,24 +421,48 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const handleClaimDecision = async (claim: ItemClaim, status: 'approved' | 'rejected') => {
+  const handleClaimDecision = async (
+    claim: ItemClaim,
+    status: 'approved' | 'rejected',
+    coResolveLostItemId?: string
+  ) => {
     setProcessingId(claim.id);
     try {
+      const coResolvedLostItem = coResolveLostItemId
+        ? lostReports.find((l) => l.id === coResolveLostItemId)
+        : undefined;
+
       const notes =
         adminNotesMap[claim.id]?.trim() ||
         (status === 'approved'
-          ? 'Ownership verified by Campus Security. Item ready for pickup with university ID.'
+          ? coResolvedLostItem
+            ? `Ownership verified by Campus Security. Co-resolved Found Item (${claim.itemId}) and Student Lost Report (${coResolvedLostItem.id}). Ready for pickup with university ID.`
+            : 'Ownership verified by Campus Security. Item ready for pickup with university ID.'
           : 'Insufficient ownership verification details provided.');
-      await onModerateClaim(claim.id, claim.itemId, status, notes);
+
+      await onModerateClaim(
+        claim.id,
+        claim.itemId,
+        status,
+        notes,
+        status === 'approved' ? coResolveLostItemId : undefined
+      );
+
       if (status === 'approved') {
         triggerBanner(
-          `Claim for "${claim.itemTitle}" approved! Item removed from active Found Directory and archived in Resolved History.`,
+          coResolvedLostItem
+            ? `Claim for "${claim.itemTitle}" approved! Both the Found Item (${claim.itemId}) and ${claim.claimantName}'s Lost Report ("${coResolvedLostItem.title}") were resolved and archived in Resolved History.`
+            : `Claim for "${claim.itemTitle}" approved! Item removed from active Found Directory and archived in Resolved History.`,
           'success',
           'resolved_history'
         );
         onNotify(
-          'Claim Approved & Item Resolved',
-          `"${claim.itemTitle}" has been moved out of the Found Directory into Resolved History.`,
+          coResolvedLostItem
+            ? 'Found Item & Student Lost Report Resolved'
+            : 'Claim Approved & Item Resolved',
+          coResolvedLostItem
+            ? `Resolved both "${claim.itemTitle}" and ${claim.claimantName}'s lost report "${coResolvedLostItem.title}".`
+            : `"${claim.itemTitle}" has been moved out of the Found Directory into Resolved History.`,
           'success'
         );
       } else {
@@ -901,7 +940,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="flex items-center justify-between gap-2">
                 <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                   <Fingerprint className="w-4 h-4 text-teal-600" />
-                  Intake Hash &amp; Lost Report Matcher
+                  Admin Image Hash Matcher
                 </h3>
                 <button
                   type="button"
@@ -912,6 +951,57 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </button>
               </div>
 
+              {/* Allow Admin to also select an ALREADY-LOGGED Found Item from the directory to hash-match & resolve with a Student Lost Report */}
+              {activeFoundItems.length > 0 && (
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 space-y-1.5">
+                  <label className="block text-[11px] font-semibold text-slate-700">
+                    Match Source (New Intake or Existing Found Directory Item):
+                  </label>
+                  <select
+                    value={selectedExistingFoundId}
+                    onChange={(e) => {
+                      const foundId = e.target.value;
+                      setSelectedExistingFoundId(foundId);
+                      if (!foundId) return;
+                      const existingFound = activeFoundItems.find((f) => f.id === foundId);
+                      if (existingFound) {
+                        setTitle(existingFound.title);
+                        setCategory(existingFound.category);
+                        setDescription(existingFound.description);
+                        setImageDataUrl(existingFound.imageDataUrl);
+                        setImageHash(existingFound.imageHash);
+                        const matches = lostReports
+                          .map((l) => ({
+                            item: l,
+                            similarity: comparePerceptualHashes(
+                              existingFound.imageHash,
+                              l.imageHash
+                            ).matchPercentage,
+                          }))
+                          .filter((m) => m.similarity > 70)
+                          .sort((a, b) => b.similarity - a.similarity);
+                        setSelectedMatchedLostId(matches[0]?.item.id ?? null);
+                        onNotify(
+                          'Loaded Existing Found Item for Hash Search',
+                          `Comparing "${existingFound.title}" (${existingFound.id}) against ${lostReports.length} student lost reports. Approving will resolve BOTH items!`,
+                          'info'
+                        );
+                      }
+                    }}
+                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg font-medium text-slate-800 focus:border-teal-600 focus:outline-none"
+                  >
+                    <option value="">
+                      New Intake Drop-Off (Current Form / Uploaded Photo)
+                    </option>
+                    {activeFoundItems.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        Existing Found Item: {f.title} (ID: {f.id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               {imageDataUrl ? (
                 <div className="space-y-3">
                   <div className="h-40 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 relative">
@@ -921,7 +1011,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       className="w-full h-full object-cover"
                     />
                     <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-slate-900/80 text-white backdrop-blur-xs">
-                      Anonymous Drop-Off
+                      {selectedExistingFoundId
+                        ? `Existing Found ID: ${selectedExistingFoundId}`
+                        : 'Anonymous Drop-Off'}
                     </span>
                   </div>
                   <div className="p-3 rounded-xl bg-slate-900 text-white flex items-center justify-between">
@@ -935,7 +1027,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <div className="p-5 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-center space-y-2">
                   <Fingerprint className="w-7 h-7 text-slate-400 mx-auto" />
                   <p className="text-xs font-medium text-slate-600">
-                    Upload a photo or select a hardware preset (e.g., <strong>14&quot; MacBook</strong> or <strong>Cognac Leather</strong>) to compute its 64-bit hash and match against student Lost Reports.
+                    Upload a photo, select a hardware preset (e.g., <strong>14&quot; MacBook</strong> or <strong>Cognac Leather</strong>), or pick an existing Found item above to match against student Lost Reports.
                   </p>
                 </div>
               )}
@@ -1133,11 +1225,58 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               {pendingClaims.map((claim) => {
                 const isProcessing = processingId === claim.id;
                 const linkedItem = items.find((i) => i.id === claim.itemId);
+
+                // Find all active Lost Items posted by this student claimant
+                const studentLostItems = lostReports.filter(
+                  (l) =>
+                    l.reporterId === claim.claimantId ||
+                    l.reporterName.toLowerCase() === claim.claimantName.toLowerCase()
+                );
+
+                const showAllCampusLost = Boolean(claimShowAllLostMap[claim.id]);
+                const candidatePool =
+                  showAllCampusLost || studentLostItems.length === 0
+                    ? lostReports
+                    : studentLostItems;
+
+                // Rank the student's lost items by 64-bit perceptual hash similarity against the claimed Found item
+                const rankedStudentLost = candidatePool
+                  .map((lostItem) => {
+                    const comp = linkedItem
+                      ? comparePerceptualHashes(linkedItem.imageHash, lostItem.imageHash)
+                      : { matchPercentage: 0, hammingDistance: 64 };
+                    return {
+                      lostItem,
+                      similarity: comp.matchPercentage,
+                      hammingDistance: comp.hammingDistance,
+                    };
+                  })
+                  .sort((a, b) => b.similarity - a.similarity);
+
+                // Determine which Student Lost Item is currently selected to co-resolve with this Found Item
+                const explicitSelection = claimLinkedLostIdMap[claim.id];
+                const defaultAutoLostId =
+                  claim.linkedLostItemId &&
+                  lostReports.some((l) => l.id === claim.linkedLostItemId)
+                    ? claim.linkedLostItemId
+                    : rankedStudentLost[0] && rankedStudentLost[0].similarity > 70
+                    ? rankedStudentLost[0].lostItem.id
+                    : '';
+
+                const effectiveLostItemId =
+                  explicitSelection === 'NONE'
+                    ? ''
+                    : explicitSelection || defaultAutoLostId;
+
+                const selectedLostReport = lostReports.find(
+                  (l) => l.id === effectiveLostItemId
+                );
+
                 return (
                   <motion.div
                     layout
                     key={claim.id}
-                    className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs hover:border-slate-300 transition-all"
+                    className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs hover:border-slate-300 transition-all space-y-4"
                   >
                     <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-100">
                       <div className="flex items-center gap-3.5">
@@ -1149,13 +1288,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           />
                         )}
                         <div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="px-2.5 py-0.5 rounded-md text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200/60">
                               Pending Verification
                             </span>
                             <span className="px-2 py-0.5 rounded-md text-xs font-mono bg-teal-50 text-teal-800">
                               {claim.matchScore}% Hash Correlation
                             </span>
+                            {selectedLostReport && (
+                              <span className="px-2 py-0.5 rounded-md text-xs font-semibold bg-indigo-50 text-indigo-800 border border-indigo-200">
+                                Co-Resolving Lost Report: {selectedLostReport.id}
+                              </span>
+                            )}
                           </div>
                           <h3 className="text-base font-bold text-slate-900 mt-1">
                             Claim for: {claim.itemTitle}
@@ -1164,6 +1308,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             Student Claimant:{' '}
                             <span className="font-semibold text-slate-900">
                               {claim.claimantName}
+                            </span>{' '}
+                            <span className="text-slate-400 font-mono">
+                              (Found Item ID: {claim.itemId})
                             </span>
                           </p>
                         </div>
@@ -1175,11 +1322,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           whileTap={{ scale: 0.97 }}
                           type="button"
                           disabled={isProcessing}
-                          onClick={() => handleClaimDecision(claim, 'approved')}
+                          onClick={() =>
+                            handleClaimDecision(
+                              claim,
+                              'approved',
+                              effectiveLostItemId || undefined
+                            )
+                          }
                           className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold rounded-xl shadow-xs transition-all cursor-pointer"
                         >
                           <CheckCircle2 className="w-4 h-4" />
-                          {isProcessing ? 'Approving...' : 'Approve & Mark Resolved'}
+                          {isProcessing
+                            ? 'Approving...'
+                            : selectedLostReport
+                            ? 'Approve & Resolve Found + Lost Item'
+                            : 'Approve & Mark Resolved'}
                         </motion.button>
                         <motion.button
                           whileHover={{ scale: 1.02 }}
@@ -1195,7 +1352,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </div>
                     </div>
 
-                    <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                       <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/60">
                         <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
                           Student Proof of Ownership
@@ -1219,6 +1376,159 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           className="w-full px-3.5 py-2.5 text-xs bg-white border border-slate-200 rounded-xl focus:border-teal-600 focus:outline-none"
                         />
                       </div>
+                    </div>
+
+                    {/* Co-Resolve Student's Logged Lost Item Report Panel (Choose from Student's Lost Items OR Image Hash Search on Student's Lost Items) */}
+                    <div className="p-4 rounded-xl bg-indigo-50/40 border border-indigo-200/80 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div>
+                          <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                            <Fingerprint className="w-4 h-4 text-indigo-600" />
+                            <span>
+                              Co-Resolve {claim.claimantName}&apos;s Logged Lost Item Report (
+                              {studentLostItems.length} posted by student)
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-600 mt-0.5">
+                            Select or run Image Hash Search on {claim.claimantName}&apos;s lost reports so approving this claim resolves <strong>both</strong> the Found item and the Student&apos;s Lost item simultaneously.
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setClaimHashScannedMap((prev) => ({
+                                ...prev,
+                                [claim.id]: true,
+                              }));
+                              if (rankedStudentLost.length > 0) {
+                                const best = rankedStudentLost[0];
+                                setClaimLinkedLostIdMap((prev) => ({
+                                  ...prev,
+                                  [claim.id]: best.lostItem.id,
+                                }));
+                                onNotify(
+                                  `Hash Search on ${claim.claimantName}'s Lost Items`,
+                                  `Top match: "${best.lostItem.title}" (${best.similarity}% similarity, d=${best.hammingDistance}). Attached for co-resolution!`,
+                                  'success'
+                                );
+                              } else {
+                                onNotify(
+                                  'No Active Lost Reports Found',
+                                  `${claim.claimantName} has no open lost item reports to match.`,
+                                  'info'
+                                );
+                              }
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-all cursor-pointer"
+                          >
+                            <Fingerprint className="w-3.5 h-3.5" />
+                            <span>
+                              Image Hash Search {claim.claimantName}&apos;s Lost Items
+                            </span>
+                          </button>
+
+                          {lostReports.length > studentLostItems.length && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setClaimShowAllLostMap((prev) => ({
+                                  ...prev,
+                                  [claim.id]: !prev[claim.id],
+                                }))
+                              }
+                              className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors cursor-pointer"
+                            >
+                              {showAllCampusLost
+                                ? `Show Only ${claim.claimantName}'s (${studentLostItems.length})`
+                                : `Show All Campus Lost Items (${lostReports.length})`}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {rankedStudentLost.length === 0 ? (
+                        <div className="text-xs text-slate-500 bg-white/80 rounded-lg px-3 py-2 border border-slate-200/70">
+                          No active lost item reports currently open in the directory. Approving will resolve the Found item directly.
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                          {rankedStudentLost.map(({ lostItem, similarity, hammingDistance }) => {
+                            const isAttached = effectiveLostItemId === lostItem.id;
+                            const wasAttachedByStudent =
+                              claim.linkedLostItemId === lostItem.id;
+                            const isScanned = Boolean(claimHashScannedMap[claim.id]);
+
+                            return (
+                              <button
+                                key={lostItem.id}
+                                type="button"
+                                onClick={() =>
+                                  setClaimLinkedLostIdMap((prev) => ({
+                                    ...prev,
+                                    [claim.id]: isAttached ? 'NONE' : lostItem.id,
+                                  }))
+                                }
+                                className={`p-3 rounded-xl border text-left flex items-center justify-between gap-3 transition-all cursor-pointer ${
+                                  isAttached
+                                    ? 'bg-emerald-50/90 border-emerald-400 shadow-xs'
+                                    : 'bg-white hover:bg-slate-50 border-slate-200'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <img
+                                    src={lostItem.imageDataUrl}
+                                    alt={lostItem.title}
+                                    className="w-11 h-11 rounded-lg object-cover border border-slate-200 shrink-0"
+                                  />
+                                  <div className="min-w-0">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="text-xs font-bold text-slate-900 truncate">
+                                        {lostItem.title}
+                                      </span>
+                                      {wasAttachedByStudent && (
+                                        <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-100 text-indigo-800">
+                                          Attached by Student
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-[11px] text-slate-600 truncate">
+                                      Lost by {lostItem.reporterName} • {lostItem.location}
+                                    </div>
+                                    <div className="text-[10px] font-mono text-slate-500 truncate">
+                                      Lost ID: {lostItem.id} • 0x{lostItem.imageHash}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="flex flex-col items-end gap-1 shrink-0">
+                                  <span
+                                    className={`px-2 py-0.5 rounded-md text-[11px] font-mono font-bold tabular-nums ${
+                                      similarity > 70
+                                        ? 'bg-emerald-600 text-white'
+                                        : isScanned
+                                        ? 'bg-indigo-600 text-white'
+                                        : 'bg-slate-100 text-slate-700'
+                                    }`}
+                                  >
+                                    {similarity}% Match (d={hammingDistance})
+                                  </span>
+                                  <span
+                                    className={`text-[10px] font-semibold ${
+                                      isAttached ? 'text-emerald-800' : 'text-slate-500'
+                                    }`}
+                                  >
+                                    {isAttached
+                                      ? '✓ Attached to Co-Resolve'
+                                      : 'Click to Attach'}
+                                  </span>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   </motion.div>
                 );

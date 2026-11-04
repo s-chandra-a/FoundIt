@@ -68,6 +68,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   // 2. Claim Modal State
   const [claimingItem, setClaimingItem] = useState<CampusItem | null>(null);
   const [claimMatchScore, setClaimMatchScore] = useState<number>(0);
+  const [selectedLostReportId, setSelectedLostReportId] = useState<string>('');
   const [proofText, setProofText] = useState<string>('');
   const [claimSubmitting, setClaimSubmitting] = useState<boolean>(false);
 
@@ -75,6 +76,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   const [queryImageUrl, setQueryImageUrl] = useState<string>('');
   const [queryHashHex, setQueryHashHex] = useState<string>('');
   const [queryLabel, setQueryLabel] = useState<string>('');
+  const [queryLostItemId, setQueryLostItemId] = useState<string>('');
   const [hashSearchRunning, setHashSearchRunning] = useState<boolean>(false);
   const [hashResults, setHashResults] = useState<
     Array<{ item: CampusItem; metrics: HashComparisonMetric }>
@@ -149,17 +151,24 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
     }, 1500);
   };
 
-  // Load a query image for Image Hash Search
-  const loadQueryImageForHash = async (dataUrl: string, label: string) => {
+  // Load a query image for Image Hash Search (optionally linked to a filed Lost Item Report)
+  const loadQueryImageForHash = async (
+    dataUrl: string,
+    label: string,
+    lostItemId = ''
+  ) => {
     const computed = await computePerceptualHash(dataUrl);
     setQueryImageUrl(computed.previewDataUrl);
     setQueryHashHex(computed.hashHex);
     setQueryLabel(label);
+    setQueryLostItemId(lostItemId);
     setHasSearchedHash(false);
     setHashResults([]);
     onNotify(
-      'Image Fingerprint Computed',
-      `Generated 64-bit dHash 0x${computed.hashHex} for "${label}". Click Compare to rank matches.`,
+      lostItemId ? 'Lost Report Attached for Hash Search' : 'Image Fingerprint Computed',
+      lostItemId
+        ? `Loaded "${label}" (${lostItemId}) with dHash 0x${computed.hashHex}. Claiming a match will automatically attach & resolve this lost report.`
+        : `Generated 64-bit dHash 0x${computed.hashHex} for "${label}". Click Compare to rank matches.`,
       'info'
     );
   };
@@ -170,7 +179,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
     const reader = new FileReader();
     reader.onload = async () => {
       if (typeof reader.result === 'string') {
-        await loadQueryImageForHash(reader.result, file.name);
+        await loadQueryImageForHash(reader.result, file.name, '');
       }
     };
     reader.readAsDataURL(file);
@@ -333,7 +342,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
     }
   };
 
-  const handleOpenClaimModal = (item: CampusItem, matchScore = 0) => {
+  const handleOpenClaimModal = (
+    item: CampusItem,
+    matchScore = 0,
+    explicitLostItemId?: string
+  ) => {
     const existingClaim = myClaims.find((c) => c.itemId === item.id);
     if (existingClaim) {
       onNotify(
@@ -344,9 +357,38 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       setActiveTab('my_claims');
       return;
     }
+
+    // Automatically determine best matching lost item from student's active lost reports
+    let autoLostId = explicitLostItemId || queryLostItemId || '';
+    if (!autoLostId && myLostReports.length > 0) {
+      const rankedMyLost = myLostReports
+        .map((lost) => ({
+          lost,
+          sim: comparePerceptualHashes(item.imageHash, lost.imageHash).matchPercentage,
+        }))
+        .sort((a, b) => b.sim - a.sim);
+
+      if (rankedMyLost[0] && rankedMyLost[0].sim >= 65) {
+        autoLostId = rankedMyLost[0].lost.id;
+      }
+    }
+
+    const attachedLost = myLostReports.find((l) => l.id === autoLostId);
+    const computedScore =
+      matchScore > 0
+        ? matchScore
+        : attachedLost
+        ? comparePerceptualHashes(item.imageHash, attachedLost.imageHash).matchPercentage
+        : 0;
+
     setClaimingItem(item);
-    setClaimMatchScore(matchScore);
-    setProofText('');
+    setClaimMatchScore(computedScore);
+    setSelectedLostReportId(autoLostId);
+    setProofText(
+      attachedLost
+        ? `Reported lost at ${attachedLost.location}: ${attachedLost.description}`
+        : ''
+    );
   };
 
   const handleClaimSubmit = async (e: React.FormEvent) => {
@@ -354,6 +396,18 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
     if (!claimingItem) return;
     const cleanProof = proofText.trim().slice(0, BLUEPRINT_CONSTRAINTS.PROOF_MAX_LEN);
     if (cleanProof.length < BLUEPRINT_CONSTRAINTS.PROOF_MIN_LEN) return;
+
+    const attachedLostItem =
+      myLostReports.find((l) => l.id === selectedLostReportId) ||
+      lostReportsOnCampus.find((l) => l.id === selectedLostReportId);
+
+    const finalMatchScore =
+      claimMatchScore > 0
+        ? claimMatchScore
+        : attachedLostItem
+        ? comparePerceptualHashes(claimingItem.imageHash, attachedLostItem.imageHash)
+            .matchPercentage
+        : 0;
 
     setClaimSubmitting(true);
     try {
@@ -365,14 +419,27 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
         claimantId: user.uid,
         claimantName: user.displayName.slice(0, 100),
         proofDescription: cleanProof,
-        matchScore: claimMatchScore,
+        matchScore: finalMatchScore,
         status: 'pending',
         adminNotes: '',
         visibility: 'campus',
+        ...(attachedLostItem
+          ? {
+              linkedLostItemId: attachedLostItem.id,
+              linkedLostItemTitle: attachedLostItem.title.slice(
+                0,
+                BLUEPRINT_CONSTRAINTS.TITLE_MAX_LEN
+              ),
+            }
+          : {}),
       });
       onNotify(
-        'Ownership Claim Submitted',
-        `Your claim for "${claimingItem.title}" is now pending Campus Security verification.`,
+        attachedLostItem
+          ? 'Claim & Linked Lost Report Submitted'
+          : 'Ownership Claim Submitted',
+        attachedLostItem
+          ? `Your claim for "${claimingItem.title}" is linked with your lost report "${attachedLostItem.title}" (${attachedLostItem.id}) so both resolve together upon approval.`
+          : `Your claim for "${claimingItem.title}" is now pending Campus Security verification.`,
         'success'
       );
       setClaimingItem(null);
@@ -686,17 +753,23 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                     {lostReportsOnCampus.length > 0 && (
                       <div className="pt-3 border-t border-slate-200/80 space-y-2">
                         <span className="block text-xs font-semibold text-slate-800">
-                          Or load from Filed Lost Item Reports:
+                          Or load from Filed Lost Item Reports (Auto-attaches on Claim):
                         </span>
                         <div className="space-y-1.5">
                           {lostReportsOnCampus.map((lostItem) => {
-                            const isSelected = queryLabel === lostItem.title;
+                            const isSelected =
+                              queryLostItemId === lostItem.id ||
+                              queryLabel === lostItem.title;
                             return (
                               <button
                                 key={lostItem.id}
                                 type="button"
                                 onClick={() =>
-                                  loadQueryImageForHash(lostItem.imageDataUrl, lostItem.title)
+                                  loadQueryImageForHash(
+                                    lostItem.imageDataUrl,
+                                    lostItem.title,
+                                    lostItem.id
+                                  )
                                 }
                                 className={`w-full text-left px-3 py-2 text-xs rounded-lg flex items-center justify-between gap-2 transition-all active:scale-[0.99] cursor-pointer border ${
                                   isSelected
@@ -704,7 +777,10 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                                     : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-800'
                                 }`}
                               >
-                                <span className="truncate">{lostItem.title}</span>
+                                <span className="truncate">
+                                  {lostItem.title}
+                                  {isSelected && ' (Attached)'}
+                                </span>
                                 <span className="font-mono text-[11px] text-slate-500 shrink-0">
                                   0x{lostItem.imageHash.slice(0, 8)}
                                 </span>
@@ -730,7 +806,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                               type="button"
                               onClick={() => {
                                 const url = renderCampusItemCanvas(preset.key, 'query');
-                                loadQueryImageForHash(url, targetLabel);
+                                const matchingMyLost = myLostReports.find((l) =>
+                                  l.title
+                                    .toLowerCase()
+                                    .includes(preset.defaultTitle.split(' ')[0].toLowerCase())
+                                );
+                                loadQueryImageForHash(
+                                  url,
+                                  targetLabel,
+                                  matchingMyLost?.id || ''
+                                );
                               }}
                               className={`px-2.5 py-2 text-left text-xs rounded-lg truncate transition-all active:scale-95 cursor-pointer border ${
                                 isSelected
@@ -916,10 +1001,18 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                               ) : (
                                 <button
                                   type="button"
-                                  onClick={() => handleOpenClaimModal(item, metrics.matchPercentage)}
+                                  onClick={() =>
+                                    handleOpenClaimModal(
+                                      item,
+                                      metrics.matchPercentage,
+                                      queryLostItemId || undefined
+                                    )
+                                  }
                                   className="px-3.5 py-2 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] active:scale-95 rounded-lg shadow-xs transition-all whitespace-nowrap shrink-0 cursor-pointer"
                                 >
-                                  Claim with {metrics.matchPercentage}% Match
+                                  {queryLostItemId
+                                    ? `Claim & Attach Lost Report (${metrics.matchPercentage}%)`
+                                    : `Claim with ${metrics.matchPercentage}% Match`}
                                 </button>
                               )}
                             </div>
@@ -1224,6 +1317,19 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                           {claim.proofDescription}
                         </p>
 
+                        {claim.linkedLostItemId && (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-indigo-50 text-indigo-800 border border-indigo-200">
+                            <Fingerprint className="w-3.5 h-3.5 text-indigo-600" />
+                            <span>
+                              Linked Lost Report: {claim.linkedLostItemTitle || claim.linkedLostItemId} (
+                              {claim.status === 'approved'
+                                ? 'Co-Resolved & Archived'
+                                : 'Will Co-Resolve on Approval'}
+                              )
+                            </span>
+                          </div>
+                        )}
+
                         {claim.adminNotes && (
                           <div className="text-xs text-emerald-900 bg-emerald-50 p-3 rounded-lg border border-emerald-200 mt-2">
                             <span className="font-semibold">Campus Security Pickup Note:</span>{' '}
@@ -1265,12 +1371,12 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                   My Filed Lost Item Reports ({myLostReports.length})
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Lost items you have registered for perceptual hash comparison.
+                  Lost items you have registered for perceptual hash comparison. When matched and approved, they are automatically resolved and archived.
                 </p>
               </div>
 
               {myLostReports.length === 0 ? (
-                <p className="text-xs text-slate-500 py-4">No lost item reports filed under your account yet.</p>
+                <p className="text-xs text-slate-500 py-4">No active lost item reports under your account.</p>
               ) : (
                 <div className="divide-y divide-slate-200 border border-slate-200 rounded-xl">
                   {myLostReports.map((item) => (
@@ -1300,12 +1406,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                         <button
                           type="button"
                           onClick={async () => {
-                            await loadQueryImageForHash(item.imageDataUrl, item.title);
+                            await loadQueryImageForHash(
+                              item.imageDataUrl,
+                              item.title,
+                              item.id
+                            );
                             setActiveTab('image_search');
                           }}
                           className="px-3 py-1.5 text-xs font-semibold text-[#1D4ED8] bg-blue-50 hover:bg-blue-100 active:scale-95 rounded-lg transition-all cursor-pointer"
                         >
-                          Search Matches
+                          Search Matches &amp; Attach
                         </button>
                         <button
                           type="button"
@@ -1333,7 +1443,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.96, y: 8 }}
               transition={{ duration: 0.15 }}
-              className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-6 shadow-2xl space-y-5"
+              className="bg-white border border-slate-200 rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-5"
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -1370,6 +1480,57 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               </div>
 
               <form onSubmit={handleClaimSubmit} className="space-y-4">
+                {/* Attach Logged Lost Item Report so both Found and Lost resolve together */}
+                {myLostReports.length > 0 && (
+                  <div className="p-3.5 rounded-xl bg-indigo-50/60 border border-indigo-200/80 space-y-2">
+                    <label className="block text-xs font-bold text-indigo-950 flex items-center justify-between">
+                      <span>Attach My Logged Lost Item Report (Auto-Resolves Both)</span>
+                      <span className="text-[10px] font-mono text-indigo-700">
+                        {myLostReports.length} active report(s)
+                      </span>
+                    </label>
+                    <select
+                      value={selectedLostReportId}
+                      onChange={(e) => {
+                        const nextId = e.target.value;
+                        setSelectedLostReportId(nextId);
+                        const foundLost = myLostReports.find((l) => l.id === nextId);
+                        if (foundLost && claimingItem) {
+                          const sim = comparePerceptualHashes(
+                            claimingItem.imageHash,
+                            foundLost.imageHash
+                          ).matchPercentage;
+                          setClaimMatchScore(sim);
+                          if (!proofText.trim()) {
+                            setProofText(
+                              `Reported lost at ${foundLost.location}: ${foundLost.description}`
+                            );
+                          }
+                        }
+                      }}
+                      className="w-full px-3 py-2 text-xs bg-white border border-indigo-200 rounded-lg font-medium text-slate-800 focus:border-[#1D4ED8] focus:outline-none"
+                    >
+                      <option value="">
+                        — Do not attach a lost report (claim found item only) —
+                      </option>
+                      {myLostReports.map((lost) => {
+                        const sim = comparePerceptualHashes(
+                          claimingItem.imageHash,
+                          lost.imageHash
+                        ).matchPercentage;
+                        return (
+                          <option key={lost.id} value={lost.id}>
+                            {lost.title} ({sim}% Hash Match • ID: {lost.id})
+                          </option>
+                        );
+                      })}
+                    </select>
+                    <p className="text-[11px] text-indigo-800">
+                      Attaching your lost report ensures that when Admin approves this claim, both the Found item and your Lost report are resolved from the active directories together.
+                    </p>
+                  </div>
+                )}
+
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1.5">
                     Proof of Ownership (Serial number, lockscreen description, contents, or markings)
@@ -1405,7 +1566,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                         <span>Submitting Claim...</span>
                       </>
                     ) : (
-                      <span>Submit Claim for Admin Review</span>
+                      <span>
+                        {selectedLostReportId
+                          ? 'Submit Claim & Attach Lost Report'
+                          : 'Submit Claim for Admin Review'}
+                      </span>
                     )}
                   </button>
                 </div>

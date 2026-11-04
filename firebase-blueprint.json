@@ -243,6 +243,16 @@
           "enum": ["campus"],
           "description": "Scope of visibility for campus claim moderation."
         },
+        "linkedLostItemId": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Optional ID of the student's reported lost item attached to this claim so both items resolve together."
+        },
+        "linkedLostItemTitle": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Optional title of the student's reported lost item attached to this claim."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

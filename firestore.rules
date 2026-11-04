@@ -114,8 +114,11 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'itemId', 'itemTitle', 'claimantId', 'claimantName',
           'proofDescription', 'matchScore', 'status', 'adminNotes',
-          'visibility', 'createdAt', 'updatedAt'
+          'visibility', 'createdAt', 'updatedAt',
+          'linkedLostItemId', 'linkedLostItemTitle'
         ])
+        && (!('linkedLostItemId' in data) || (data.linkedLostItemId is string && data.linkedLostItemId.size() <= 128))
+        && (!('linkedLostItemTitle' in data) || (data.linkedLostItemTitle is string && data.linkedLostItemTitle.size() <= 120))
         && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$')
         && data.itemId is string && data.itemId.size() >= 1 && data.itemId.size() <= 128 && data.itemId.matches('^[a-zA-Z0-9_\\-]+$')
         && data.itemTitle is string && data.itemTitle.size() >= 2 && data.itemTitle.size() <= 120

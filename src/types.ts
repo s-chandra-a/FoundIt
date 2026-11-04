@@ -60,6 +60,8 @@ export interface ItemClaim {
   status: ClaimStatus;
   adminNotes: string;
   visibility: 'campus';
+  linkedLostItemId?: string;
+  linkedLostItemTitle?: string;
   createdAt?: unknown;
   updatedAt?: unknown;
 }
