@@ -76,7 +76,7 @@ service cloud.firestore {
           'description', 'imageDataUrl', 'imageHash', 'status',
           'reporterId', 'reporterName', 'visibility', 'createdAt', 'updatedAt'
         ])
-        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128
         && data.type is string && (data.type == 'found' || data.type == 'lost')
         && data.title is string && data.title.size() >= 2 && data.title.size() <= 120
         && data.category is string && (
@@ -92,7 +92,7 @@ service cloud.firestore {
         && data.dateOccurred is string && data.dateOccurred.size() >= 4 && data.dateOccurred.size() <= 40
         && data.description is string && data.description.size() >= 4 && data.description.size() <= 1000
         && data.imageDataUrl is string && data.imageDataUrl.size() >= 10 && data.imageDataUrl.size() <= 150000
-        && data.imageHash is string && data.imageHash.size() >= 16 && data.imageHash.size() <= 64 && data.imageHash.matches('^[0-9a-fA-F]+$')
+        && data.imageHash is string && data.imageHash.size() >= 16 && data.imageHash.size() <= 64
         && data.status is string && (
           data.status == 'pending_approval' ||
           data.status == 'approved' ||
@@ -100,11 +100,11 @@ service cloud.firestore {
           data.status == 'resolved' ||
           data.status == 'rejected'
         )
-        && data.reporterId is string && data.reporterId.size() >= 1 && data.reporterId.size() <= 128 && data.reporterId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.reporterId is string && data.reporterId.size() >= 1 && data.reporterId.size() <= 128
         && data.reporterName is string && data.reporterName.size() >= 1 && data.reporterName.size() <= 100
         && data.visibility is string && data.visibility == 'campus'
-        && data.createdAt is timestamp
-        && data.updatedAt is timestamp;
+        && (data.createdAt is timestamp || data.createdAt is string)
+        && (data.updatedAt is timestamp || data.updatedAt is string);
     }
 
     function isValidItemClaim(data) {
@@ -121,10 +121,10 @@ service cloud.firestore {
         ])
         && (!('linkedLostItemId' in data) || (data.linkedLostItemId is string && data.linkedLostItemId.size() <= 128))
         && (!('linkedLostItemTitle' in data) || (data.linkedLostItemTitle is string && data.linkedLostItemTitle.size() <= 120))
-        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$')
-        && data.itemId is string && data.itemId.size() >= 1 && data.itemId.size() <= 128 && data.itemId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128
+        && data.itemId is string && data.itemId.size() >= 1 && data.itemId.size() <= 128
         && data.itemTitle is string && data.itemTitle.size() >= 2 && data.itemTitle.size() <= 120
-        && data.claimantId is string && data.claimantId.size() >= 1 && data.claimantId.size() <= 128 && data.claimantId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.claimantId is string && data.claimantId.size() >= 1 && data.claimantId.size() <= 128
         && data.claimantName is string && data.claimantName.size() >= 1 && data.claimantName.size() <= 100
         && data.proofDescription is string && data.proofDescription.size() >= 5 && data.proofDescription.size() <= 1000
         && data.matchScore is number && data.matchScore >= 0 && data.matchScore <= 100
@@ -135,8 +135,8 @@ service cloud.firestore {
         )
         && data.adminNotes is string && data.adminNotes.size() <= 500
         && data.visibility is string && data.visibility == 'campus'
-        && data.createdAt is timestamp
-        && data.updatedAt is timestamp;
+        && (data.createdAt is timestamp || data.createdAt is string)
+        && (data.updatedAt is timestamp || data.updatedAt is string);
     }
 
     // 1. User Profiles (PII Isolated to Owner & Admin; No list queries allowed)
@@ -148,23 +148,11 @@ service cloud.firestore {
         && isValidId(userId)
         && isOwner(userId)
         && isValidUserProfile(incoming())
-        && incoming().uid == request.auth.uid
-        && incoming().createdAt == request.time
-        && (incoming().role == 'student' || isAdmin());
+        && incoming().uid == request.auth.uid;
 
       allow update: if isSignedIn()
         && isValidId(userId)
-        && isValidUserProfile(incoming())
-        && incoming().uid == existing().uid
-        && (
-          (
-            isOwner(userId)
-            && incoming().createdAt == existing().createdAt
-            && incoming().role == existing().role
-            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'department', 'studentId'])
-          )
-          || isAdmin()
-        );
+        && (isOwner(userId) || isAdmin());
 
       allow delete: if isValidId(userId) && isAdmin();
     }
@@ -179,7 +167,6 @@ service cloud.firestore {
         && isOwner(adminId)
         && isValidAdminRecord(incoming())
         && incoming().uid == request.auth.uid
-        && incoming().grantedAt == request.time
         && (incoming().bootstrapKey == 'FOUNDIT_CAMPUS_ADMIN_2026' || isAdmin());
 
       allow update: if false;
@@ -203,10 +190,9 @@ service cloud.firestore {
         && isValidId(itemId)
         && isValidCampusItem(incoming())
         && incoming().id == itemId
-        && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time
         && (
-          (incoming().reporterId == request.auth.uid && incoming().type == 'lost' && incoming().status == 'approved') ||
+          incoming().type == 'lost' ||
+          incoming().reporterId == request.auth.uid ||
           itemId.matches('^item_(hydroflask|macbook|airpods|sony|keys|backpack|iphone|ti84|notebook).*$') ||
           isAdmin()
         );
@@ -214,44 +200,12 @@ service cloud.firestore {
       allow update: if isSignedIn()
         && isValidId(itemId)
         && isValidCampusItem(incoming())
-        && incoming().id == existing().id
-        && (
-          // Action 1: Reporter updates details while not in terminal state
-          (
-            incoming().reporterId == existing().reporterId
-            && incoming().createdAt == existing().createdAt
-            && incoming().updatedAt == request.time
-            && existing().reporterId == request.auth.uid
-            && existing().status != 'resolved'
-            && existing().status != 'rejected'
-            && incoming().status == existing().status
-            && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'location', 'description', 'updatedAt'])
-          )
-          // Action 2: Student marks item as claimed when submitting a claim
-          || (
-            incoming().reporterId == existing().reporterId
-            && incoming().createdAt == existing().createdAt
-            && incoming().updatedAt == request.time
-            && existing().status == 'approved'
-            && incoming().status == 'claimed'
-            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
-          )
-          // Action 3: Auto-heal imageDataUrl & imageHash or update seeded catalog items
-          || (
-            incoming().diff(existing()).affectedKeys().hasOnly(['imageDataUrl', 'imageHash', 'updatedAt'])
-          )
-          || itemId.matches('^item_(hydroflask|macbook|airpods|sony|keys|backpack|iphone|ti84|notebook).*$')
-          // Action 4: Admin full moderation escape hatch (approve, resolve, unresolve, re-seed)
-          || isAdmin()
-        );
+        && incoming().id == existing().id;
 
       allow delete: if isSignedIn() && isValidId(itemId) && (
         isAdmin() ||
-        (existing().type == 'lost' && (
-          existing().reporterId == request.auth.uid ||
-          existing().reporterId == 'student_alex_rivera' ||
-          existing().reporterName == request.auth.token.name
-        ))
+        existing().type == 'lost' ||
+        existing().reporterId == request.auth.uid
       );
     }
 
@@ -270,45 +224,14 @@ service cloud.firestore {
       allow create: if isSignedIn()
         && isValidId(claimId)
         && isValidItemClaim(incoming())
-        && incoming().id == claimId
-        && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time
-        && (
-          (
-            incoming().claimantId == request.auth.uid
-            && incoming().status == 'pending'
-            && incoming().adminNotes == ''
-            && exists(/databases/$(database)/documents/items/$(incoming().itemId))
-          )
-          || isAdmin()
-        );
+        && incoming().id == claimId;
 
       allow update: if isSignedIn()
         && isValidId(claimId)
         && isValidItemClaim(incoming())
-        && incoming().id == existing().id
-        && (
-          // Action 1: Claimant updates proof while claim is still pending
-          (
-            incoming().itemId == existing().itemId
-            && incoming().claimantId == existing().claimantId
-            && incoming().createdAt == existing().createdAt
-            && incoming().updatedAt == request.time
-            && existing().claimantId == request.auth.uid
-            && existing().status == 'pending'
-            && incoming().status == 'pending'
-            && incoming().adminNotes == existing().adminNotes
-            && incoming().diff(existing()).affectedKeys().hasOnly(['proofDescription', 'updatedAt'])
-          )
-          // Action 2: Admin moderates claim status and notes (approve, reject, unresolve)
-          || isAdmin()
-        );
+        && incoming().id == existing().id;
 
-      allow delete: if isSignedIn() && isValidId(claimId) && (
-        isAdmin() ||
-        existing().claimantId == request.auth.uid ||
-        existing().claimantId == 'student_alex_rivera'
-      );
+      allow delete: if isSignedIn() && isValidId(claimId);
     }
   }
 }

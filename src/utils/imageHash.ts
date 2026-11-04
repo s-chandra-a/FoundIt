@@ -915,10 +915,10 @@ export function isLegacyBookFallback(item: {
 
   const hashLower = (item.imageHash || '').toLowerCase();
   return (
-    hashLower.startsWith('fffbdbf') ||
-    hashLower.startsWith('ffffbdbf') ||
-    hashLower.includes('bdbf') ||
-    hashLower.includes('bdbdadbf')
+    hashLower === 'fffbdbfbadbfdfff' ||
+    hashLower === 'ffffbdbfbadbffff' ||
+    hashLower.startsWith('fffbdbfb') ||
+    hashLower.startsWith('ffffbdbf')
   );
 }
 

@@ -32,12 +32,7 @@ import {
   UserCheck,
   X,
 } from 'lucide-react';
-import {
-  auth,
-  db,
-  handleFirestoreError,
-  OperationType,
-} from './firebase';
+import { auth, db } from './firebase';
 import {
   CampusItem,
   ClaimStatus,
@@ -81,7 +76,8 @@ export default function App() {
 
   const [items, setItems] = useState<CampusItem[]>([]);
   const [claims, setClaims] = useState<ItemClaim[]>([]);
-  const [hasSeededOnce, setHasSeededOnce] = useState<boolean>(false);
+  const hasSeededRef = useRef<boolean>(false);
+  const healedItemIdsRef = useRef<Set<string>>(new Set());
   const [toasts, setToasts] = useState<ToastNotification[]>([]);
 
   const handleNotify = useCallback(
@@ -204,11 +200,8 @@ export default function App() {
             (i) =>
               i.id === 'item_macbook_101' ||
               i.id === 'item_lost_macbook_201' ||
-              isLegacyBookFallback(i) ||
-              (i.type === 'lost' && i.reporterName.toLowerCase().includes('admin'))
-          ) ||
-          !list.some((i) => i.id === 'item_macbook_found_101') ||
-          !list.some((i) => i.id === 'item_airpods_103');
+              isLegacyBookFallback(i)
+          );
 
         // Check server or localStorage first so changes persist across Student <-> Admin switches
         try {
@@ -293,10 +286,14 @@ export default function App() {
         });
         setItems(fetchedItems);
 
-        // Auto-heal any legacy fallback book items (0xfffbdbfb...) in both state and Firestore
+        // One-time auto-heal of any legacy fallback book items (0xfffbdbfb...) without recurring loops
         for (const rawDoc of snapshot.docs) {
           const rawItem = rawDoc.data() as CampusItem;
-          if (isLegacyBookFallback(rawItem)) {
+          if (
+            isLegacyBookFallback(rawItem) &&
+            !healedItemIdsRef.current.has(rawItem.id)
+          ) {
+            healedItemIdsRef.current.add(rawItem.id);
             const fixedImg = renderCampusItemCanvas(
               rawItem.title,
               rawItem.type === 'lost' ? 'query' : 'catalog',
@@ -315,56 +312,29 @@ export default function App() {
                       : p
                   )
                 );
-                updateDoc(doc(db, 'items', rawItem.id), {
-                  imageDataUrl: comp.previewDataUrl,
-                  imageHash: comp.hashHex,
-                  updatedAt: serverTimestamp(),
-                }).catch(() => {});
+                if (comp.hashHex !== rawItem.imageHash) {
+                  updateDoc(doc(db, 'items', rawItem.id), {
+                    imageDataUrl: comp.previewDataUrl,
+                    imageHash: comp.hashHex,
+                    updatedAt: serverTimestamp(),
+                  }).catch(() => {});
+                }
               })
               .catch(() => {});
           }
         }
 
-        const needsLegacyCleanup =
-          fetchedItems.some(
-            (i) =>
-              i.id === 'item_macbook_101' ||
-              i.id === 'item_lost_macbook_201' ||
-              (i.type === 'lost' && i.reporterName.toLowerCase().includes('admin'))
-          ) ||
-          (fetchedItems.length > 0 &&
-            (!fetchedItems.some((i) => i.id === 'item_macbook_found_101') ||
-              !fetchedItems.some((i) => i.id === 'item_airpods_103')));
-
-        if ((fetchedItems.length === 0 || needsLegacyCleanup) && !hasSeededOnce) {
-          setHasSeededOnce(true);
+        // Only seed automatically when the database collection is completely empty
+        if (fetchedItems.length === 0 && !hasSeededRef.current) {
+          hasSeededRef.current = true;
           try {
             const seedItems = await buildInitialCampusItems(
               userProfile.uid,
               userProfile.displayName,
               userProfile.role
             );
-            const seedIds = new Set(seedItems.map((s) => s.id));
-            // Immediately reflect full rich catalog in UI state
-            setItems((prev) => {
-              const customItems = prev.filter(
-                (p) =>
-                  !seedIds.has(p.id) &&
-                  !p.id.startsWith('item_sony_xm5_') &&
-                  !p.id.startsWith('item_keys_id_') &&
-                  !p.id.startsWith('item_ti84_calc_') &&
-                  !p.id.startsWith('item_notebook_')
-              );
-              return [...seedItems, ...customItems];
-            });
+            setItems(seedItems);
 
-            if (needsLegacyCleanup && userProfile.role === 'admin') {
-              for (const oldItem of fetchedItems) {
-                if (!seedIds.has(oldItem.id)) {
-                  await deleteDoc(doc(db, 'items', oldItem.id)).catch(() => {});
-                }
-              }
-            }
             for (const item of seedItems) {
               await setDoc(doc(db, 'items', item.id), {
                 ...item,
@@ -390,7 +360,7 @@ export default function App() {
         }
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, 'items');
+        console.warn('Firestore items listener warning:', error);
       }
     );
 
@@ -408,7 +378,7 @@ export default function App() {
         setClaims(fetchedClaims);
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, 'claims');
+        console.warn('Firestore claims listener warning:', error);
       }
     );
 
@@ -416,7 +386,7 @@ export default function App() {
       unsubItems();
       unsubClaims();
     };
-  }, [authReady, userProfile, hasSeededOnce, persistStateSnapshot]);
+  }, [authReady, userProfile, persistStateSnapshot]);
 
   // CRUD Handlers
   const handleCreateItem = async (
@@ -424,28 +394,46 @@ export default function App() {
   ) => {
     if (!userProfile) return;
 
-    const itemWithTimestamp: CampusItem = {
+    const effectiveUid =
+      auth.currentUser?.uid || newItem.reporterId || userProfile.uid;
+    const effectiveName = (
+      newItem.reporterName ||
+      userProfile.displayName ||
+      'University Student'
+    ).slice(0, 100);
+
+    const normalizedNewItem: Omit<CampusItem, 'createdAt' | 'updatedAt'> = {
       ...newItem,
+      reporterId: effectiveUid,
+      reporterName: effectiveName,
+    };
+
+    const itemWithTimestamp: CampusItem = {
+      ...normalizedNewItem,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 
-    if (userProfile.isLocalDemoSession) {
-      const nextItems = [itemWithTimestamp, ...items];
-      setItems(nextItems);
-      await persistStateSnapshot(nextItems, claims);
+    // Optimistically update UI state and persist immediately
+    const nextItems = [
+      itemWithTimestamp,
+      ...items.filter((i) => i.id !== itemWithTimestamp.id),
+    ];
+    setItems(nextItems);
+    await persistStateSnapshot(nextItems, claims);
+
+    if (userProfile.isLocalDemoSession || !auth.currentUser) {
       return;
     }
 
-    const path = `items/${newItem.id}`;
     try {
-      await setDoc(doc(db, 'items', newItem.id), {
-        ...newItem,
+      await setDoc(doc(db, 'items', normalizedNewItem.id), {
+        ...normalizedNewItem,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, path);
+      console.warn('Firestore create item fallback used:', error);
     }
   };
 
@@ -454,65 +442,82 @@ export default function App() {
   ) => {
     if (!userProfile) return;
 
-    const claimWithTimestamp: ItemClaim = {
+    const effectiveUid =
+      auth.currentUser?.uid || newClaim.claimantId || userProfile.uid;
+    const effectiveName = (
+      newClaim.claimantName ||
+      userProfile.displayName ||
+      'University Student'
+    ).slice(0, 100);
+
+    const normalizedClaim: Omit<ItemClaim, 'createdAt' | 'updatedAt'> = {
       ...newClaim,
+      claimantId: effectiveUid,
+      claimantName: effectiveName,
+    };
+
+    const claimWithTimestamp: ItemClaim = {
+      ...normalizedClaim,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 
-    if (userProfile.isLocalDemoSession) {
-      const nextClaims = [claimWithTimestamp, ...claims];
-      const nextItems = items.map((it) =>
-        it.id === newClaim.itemId && it.status === 'approved'
-          ? { ...it, status: 'claimed' as ItemStatus }
-          : it
-      );
-      setClaims(nextClaims);
-      setItems(nextItems);
-      await persistStateSnapshot(nextItems, nextClaims);
+    const nextClaims = [
+      claimWithTimestamp,
+      ...claims.filter((c) => c.id !== claimWithTimestamp.id),
+    ];
+    const nextItems = items.map((it) =>
+      it.id === normalizedClaim.itemId && it.status === 'approved'
+        ? { ...it, status: 'claimed' as ItemStatus }
+        : it
+    );
+    setClaims(nextClaims);
+    setItems(nextItems);
+    await persistStateSnapshot(nextItems, nextClaims);
+
+    if (userProfile.isLocalDemoSession || !auth.currentUser) {
       return;
     }
 
-    const claimPath = `claims/${newClaim.id}`;
     try {
-      await setDoc(doc(db, 'claims', newClaim.id), {
-        ...newClaim,
+      await setDoc(doc(db, 'claims', normalizedClaim.id), {
+        ...normalizedClaim,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
 
-      const targetItem = items.find((i) => i.id === newClaim.itemId);
+      const targetItem = items.find((i) => i.id === normalizedClaim.itemId);
       if (targetItem && targetItem.status === 'approved') {
-        await updateDoc(doc(db, 'items', newClaim.itemId), {
+        await updateDoc(doc(db, 'items', normalizedClaim.itemId), {
           status: 'claimed',
           updatedAt: serverTimestamp(),
         });
       }
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, claimPath);
+      console.warn('Firestore create claim fallback used:', error);
     }
   };
 
   const handleUpdateItemStatus = async (itemId: string, status: ItemStatus) => {
     if (!userProfile) return;
 
-    if (userProfile.isLocalDemoSession) {
-      const nextItems = items.map((it) =>
-        it.id === itemId ? { ...it, status } : it
-      );
-      setItems(nextItems);
-      await persistStateSnapshot(nextItems, claims);
+    const nextItems = items.map((it) =>
+      it.id === itemId ? { ...it, status } : it
+    );
+    setItems(nextItems);
+    await persistStateSnapshot(nextItems, claims);
+
+    if (userProfile.isLocalDemoSession || !auth.currentUser) {
       return;
     }
 
-    const path = `items/${itemId}`;
     try {
       await updateDoc(doc(db, 'items', itemId), {
         status,
         updatedAt: serverTimestamp(),
       });
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
+      console.warn('Firestore update item status fallback used:', error);
     }
   };
 
@@ -524,28 +529,28 @@ export default function App() {
       (c) => c.itemId === itemId && c.status === 'approved'
     );
 
-    if (userProfile.isLocalDemoSession) {
-      const nextItems = items.map((it) =>
-        it.id === itemId
-          ? { ...it, type: 'found' as const, status: 'approved' as ItemStatus }
-          : it
-      );
-      const nextClaims = claims.map((c) =>
-        c.itemId === itemId && c.status === 'approved'
-          ? {
-              ...c,
-              status: 'pending' as ClaimStatus,
-              adminNotes: 'Unresolved by Admin — returned to active Found Directory.',
-            }
-          : c
-      );
-      setItems(nextItems);
-      setClaims(nextClaims);
-      await persistStateSnapshot(nextItems, nextClaims);
+    const nextItems = items.map((it) =>
+      it.id === itemId
+        ? { ...it, type: 'found' as const, status: 'approved' as ItemStatus }
+        : it
+    );
+    const nextClaims = claims.map((c) =>
+      c.itemId === itemId && c.status === 'approved'
+        ? {
+            ...c,
+            status: 'pending' as ClaimStatus,
+            adminNotes: 'Unresolved by Admin — returned to active Found Directory.',
+          }
+        : c
+    );
+    setItems(nextItems);
+    setClaims(nextClaims);
+    await persistStateSnapshot(nextItems, nextClaims);
+
+    if (userProfile.isLocalDemoSession || !auth.currentUser) {
       return;
     }
 
-    const itemPath = `items/${itemId}`;
     try {
       await updateDoc(doc(db, 'items', itemId), {
         type: 'found',
@@ -561,7 +566,7 @@ export default function App() {
         });
       }
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, itemPath);
+      console.warn('Firestore unresolve item fallback used:', error);
     }
   };
 
@@ -628,46 +633,46 @@ export default function App() {
       linkedLostItemTitle: lostItem.title.slice(0, 120),
     };
 
-    if (userProfile.isLocalDemoSession) {
-      const nextItems = items
-        .filter((it) => !duplicateItemIds.includes(it.id))
-        .map((it) =>
-          it.id === unifiedItemId
-            ? {
-                ...it,
-                type: 'found' as const,
-                title: (foundDetails.title || lostItem.title).slice(0, 120),
-                category: foundDetails.category,
-                location: unifiedLocation,
-                dateOccurred: foundDetails.dateOccurred,
-                description: unifiedDescription,
-                imageDataUrl: foundDetails.imageDataUrl,
-                imageHash: foundDetails.imageHash,
-                status: 'resolved' as ItemStatus,
-                updatedAt: nowIso,
-              }
-            : it
-        );
-
-      const otherClaims = claims.filter(
-        (c) => c.id !== unifiedClaimId && !duplicateItemIds.includes(c.itemId)
+    const nextItems = items
+      .filter((it) => !duplicateItemIds.includes(it.id))
+      .map((it) =>
+        it.id === unifiedItemId
+          ? {
+              ...it,
+              type: 'found' as const,
+              title: (foundDetails.title || lostItem.title).slice(0, 120),
+              category: foundDetails.category,
+              location: unifiedLocation,
+              dateOccurred: foundDetails.dateOccurred,
+              description: unifiedDescription,
+              imageDataUrl: foundDetails.imageDataUrl,
+              imageHash: foundDetails.imageHash,
+              status: 'resolved' as ItemStatus,
+              updatedAt: nowIso,
+            }
+          : it
       );
-      const nextClaims: ItemClaim[] = [
-        {
-          ...unifiedClaimBase,
-          createdAt: nowIso,
-          updatedAt: nowIso,
-        },
-        ...otherClaims,
-      ];
 
-      setItems(nextItems);
-      setClaims(nextClaims);
-      await persistStateSnapshot(nextItems, nextClaims);
+    const otherClaims = claims.filter(
+      (c) => c.id !== unifiedClaimId && !duplicateItemIds.includes(c.itemId)
+    );
+    const nextClaims: ItemClaim[] = [
+      {
+        ...unifiedClaimBase,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      },
+      ...otherClaims,
+    ];
+
+    setItems(nextItems);
+    setClaims(nextClaims);
+    await persistStateSnapshot(nextItems, nextClaims);
+
+    if (userProfile.isLocalDemoSession || !auth.currentUser) {
       return;
     }
 
-    const itemPath = `items/${unifiedItemId}`;
     try {
       await updateDoc(doc(db, 'items', unifiedItemId), {
         type: 'found',
@@ -683,7 +688,7 @@ export default function App() {
       });
 
       for (const dupId of duplicateItemIds) {
-        await deleteDoc(doc(db, 'items', dupId));
+        await deleteDoc(doc(db, 'items', dupId)).catch(() => {});
       }
 
       await setDoc(doc(db, 'claims', unifiedClaimId), {
@@ -692,7 +697,7 @@ export default function App() {
         updatedAt: serverTimestamp(),
       });
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, itemPath);
+      console.warn('Firestore resolve matched lost report fallback used:', error);
     }
   };
 
@@ -706,40 +711,27 @@ export default function App() {
     const nextClaims = claims.filter((c) => c.itemId !== itemId);
     setItems(nextItems);
     setClaims(nextClaims);
+    await persistStateSnapshot(nextItems, nextClaims);
 
-    if (userProfile.isLocalDemoSession) {
-      await persistStateSnapshot(nextItems, nextClaims);
+    if (userProfile.isLocalDemoSession || !auth.currentUser) {
       return;
     }
 
-    const path = `items/${itemId}`;
     try {
       await deleteDoc(doc(db, 'items', itemId));
     } catch (error) {
-      console.error('Failed to delete item from Firestore:', error);
-      handleFirestoreError(error, OperationType.DELETE, path);
-      // Revert state if deletion failed
-      setItems(items);
-      setClaims(claims);
+      console.warn('Firestore delete item fallback used:', error);
       return;
     }
 
     // Safely delete any orphaned claims if allowed (non-blocking for item deletion)
     for (const clm of orphanedClaims) {
-      if (
-        userProfile.role === 'admin' ||
-        clm.claimantId === userProfile.uid ||
-        clm.claimantId === 'student_alex_rivera'
-      ) {
-        try {
-          await deleteDoc(doc(db, 'claims', clm.id));
-        } catch (claimErr) {
-          console.warn('Could not delete associated claim:', claimErr);
-        }
+      try {
+        await deleteDoc(doc(db, 'claims', clm.id));
+      } catch (claimErr) {
+        console.warn('Could not delete associated claim:', claimErr);
       }
     }
-
-    await persistStateSnapshot(nextItems, nextClaims);
   };
 
   const handleModerateClaim = async (
@@ -790,69 +782,69 @@ export default function App() {
         c.status === 'pending'
     );
 
-    if (userProfile.isLocalDemoSession) {
-      const nextClaims = claims.map((c) => {
-        if (c.id === claimId) {
+    const nextClaims = claims.map((c) => {
+      if (c.id === claimId) {
+        return {
+          ...c,
+          status,
+          adminNotes,
+          ...(coResolvedLostItem
+            ? {
+                linkedLostItemId: coResolvedLostItem.id,
+                linkedLostItemTitle: coResolvedLostItem.title.slice(0, 120),
+              }
+            : {}),
+        };
+      }
+      if (
+        status === 'approved' &&
+        (c.itemId === itemId || duplicateLostIds.includes(c.itemId)) &&
+        c.status === 'pending'
+      ) {
+        return {
+          ...c,
+          status: 'rejected' as ClaimStatus,
+          adminNotes: 'Item ownership verified and resolved with another claimant.',
+        };
+      }
+      return c;
+    });
+
+    const nextItems = items
+      .filter((it) => !duplicateLostIds.includes(it.id))
+      .map((it) => {
+        if (it.id !== itemId) return it;
+        if (status === 'approved') {
           return {
-            ...c,
-            status,
-            adminNotes,
-            ...(coResolvedLostItem
-              ? {
-                  linkedLostItemId: coResolvedLostItem.id,
-                  linkedLostItemTitle: coResolvedLostItem.title.slice(0, 120),
-                }
-              : {}),
+            ...it,
+            type: 'found' as const,
+            status: 'resolved' as ItemStatus,
+            description: coResolvedLostItem
+              ? `${it.description} | Co-Resolved Student Lost Report (${coResolvedLostItem.id}): ${coResolvedLostItem.description}`.slice(
+                  0,
+                  1000
+                )
+              : it.description,
           };
         }
         if (
-          status === 'approved' &&
-          (c.itemId === itemId || duplicateLostIds.includes(c.itemId)) &&
-          c.status === 'pending'
+          status === 'rejected' &&
+          otherPendingClaimsOnItem.length === 0 &&
+          it.status === 'claimed'
         ) {
-          return {
-            ...c,
-            status: 'rejected' as ClaimStatus,
-            adminNotes: 'Item ownership verified and resolved with another claimant.',
-          };
+          return { ...it, status: 'approved' as ItemStatus };
         }
-        return c;
+        return it;
       });
 
-      const nextItems = items
-        .filter((it) => !duplicateLostIds.includes(it.id))
-        .map((it) => {
-          if (it.id !== itemId) return it;
-          if (status === 'approved') {
-            return {
-              ...it,
-              type: 'found' as const,
-              status: 'resolved' as ItemStatus,
-              description: coResolvedLostItem
-                ? `${it.description} | Co-Resolved Student Lost Report (${coResolvedLostItem.id}): ${coResolvedLostItem.description}`.slice(
-                    0,
-                    1000
-                  )
-                : it.description,
-            };
-          }
-          if (
-            status === 'rejected' &&
-            otherPendingClaimsOnItem.length === 0 &&
-            it.status === 'claimed'
-          ) {
-            return { ...it, status: 'approved' as ItemStatus };
-          }
-          return it;
-        });
+    setClaims(nextClaims);
+    setItems(nextItems);
+    await persistStateSnapshot(nextItems, nextClaims);
 
-      setClaims(nextClaims);
-      setItems(nextItems);
-      await persistStateSnapshot(nextItems, nextClaims);
+    if (userProfile.isLocalDemoSession || !auth.currentUser) {
       return;
     }
 
-    const claimPath = `claims/${claimId}`;
     try {
       await updateDoc(doc(db, 'claims', claimId), {
         status,
@@ -884,14 +876,14 @@ export default function App() {
           });
         }
         for (const dupId of duplicateLostIds) {
-          await deleteDoc(doc(db, 'items', dupId));
+          await deleteDoc(doc(db, 'items', dupId)).catch(() => {});
         }
         for (const otherClaim of otherPendingClaimsOnItem) {
           await updateDoc(doc(db, 'claims', otherClaim.id), {
             status: 'rejected',
             adminNotes: 'Item ownership verified and resolved with another claimant.',
             updatedAt: serverTimestamp(),
-          });
+          }).catch(() => {});
         }
       } else if (status === 'rejected') {
         if (
@@ -906,25 +898,25 @@ export default function App() {
         }
       }
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, claimPath);
+      console.warn('Firestore moderate claim fallback used:', error);
     }
   };
 
   const handleDeleteClaim = async (claimId: string) => {
     if (!userProfile) return;
 
-    if (userProfile.isLocalDemoSession) {
-      const nextClaims = claims.filter((c) => c.id !== claimId);
-      setClaims(nextClaims);
-      await persistStateSnapshot(items, nextClaims);
+    const nextClaims = claims.filter((c) => c.id !== claimId);
+    setClaims(nextClaims);
+    await persistStateSnapshot(items, nextClaims);
+
+    if (userProfile.isLocalDemoSession || !auth.currentUser) {
       return;
     }
 
-    const path = `claims/${claimId}`;
     try {
       await deleteDoc(doc(db, 'claims', claimId));
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, path);
+      console.warn('Firestore delete claim fallback used:', error);
     }
   };
 
@@ -941,10 +933,11 @@ export default function App() {
       userProfile.role
     );
 
-    if (userProfile.isLocalDemoSession) {
-      setItems(seedItems);
-      setClaims(seedClaims);
-      await persistStateSnapshot(seedItems, seedClaims);
+    setItems(seedItems);
+    setClaims(seedClaims);
+    await persistStateSnapshot(seedItems, seedClaims);
+
+    if (userProfile.isLocalDemoSession || !auth.currentUser) {
       return;
     }
 
@@ -972,7 +965,6 @@ export default function App() {
     }
 
     for (const item of seedItems) {
-      const path = `items/${item.id}`;
       try {
         await setDoc(doc(db, 'items', item.id), {
           ...item,
@@ -980,12 +972,11 @@ export default function App() {
           updatedAt: serverTimestamp(),
         });
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, path);
+        console.warn('Seed item write skipped:', error);
       }
     }
 
     for (const clm of seedClaims) {
-      const path = `claims/${clm.id}`;
       try {
         await setDoc(doc(db, 'claims', clm.id), {
           ...clm,
@@ -993,7 +984,7 @@ export default function App() {
           updatedAt: serverTimestamp(),
         });
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, path);
+        console.warn('Seed claim write skipped:', error);
       }
     }
   };

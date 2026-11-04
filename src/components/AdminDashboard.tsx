@@ -312,7 +312,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       let finalHash = imageHash;
 
       if (!finalDataUrl || !finalHash) {
-        const canvasDataUrl = renderCampusItemCanvas(selectedPresetKey, 'catalog');
+        const canvasDataUrl = renderCampusItemCanvas(
+          title.trim() || matchedLostItem.title || selectedPresetKey,
+          'catalog',
+          category || matchedLostItem.category
+        );
         const computed = await computePerceptualHash(canvasDataUrl);
         finalDataUrl = computed.previewDataUrl;
         finalHash = computed.hashHex;
@@ -374,7 +378,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       let finalHash = imageHash;
 
       if (!finalDataUrl || !finalHash) {
-        const canvasDataUrl = renderCampusItemCanvas(selectedPresetKey, 'catalog');
+        const canvasDataUrl = renderCampusItemCanvas(
+          title.trim() || selectedPresetKey,
+          'catalog',
+          category
+        );
         const computed = await computePerceptualHash(canvasDataUrl);
         finalDataUrl = computed.previewDataUrl;
         finalHash = computed.hashHex;

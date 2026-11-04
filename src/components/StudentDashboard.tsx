@@ -294,25 +294,47 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
     e.preventDefault();
     setReportSuccess(null);
 
-    let finalImageUrl = itemImageUrl;
-    let finalImageHash = itemImageHash;
-
-    if (!finalImageUrl || !finalImageHash) {
-      const fallbackRaw = renderCampusItemCanvas('macbook_sleeve', 'query');
-      const computed = await computePerceptualHash(fallbackRaw);
-      finalImageUrl = computed.previewDataUrl;
-      finalImageHash = computed.hashHex;
-    }
-
     const cleanTitle = itemTitle.trim().slice(0, BLUEPRINT_CONSTRAINTS.TITLE_MAX_LEN);
-    const cleanLocation = itemLocation.trim().slice(0, BLUEPRINT_CONSTRAINTS.LOCATION_MAX_LEN);
+    const cleanLocation = (itemLocation.trim() || CAMPUS_LOCATIONS[0]).slice(
+      0,
+      BLUEPRINT_CONSTRAINTS.LOCATION_MAX_LEN
+    );
     const cleanDesc = itemDescription.trim().slice(0, BLUEPRINT_CONSTRAINTS.DESCRIPTION_MAX_LEN);
+    const cleanDate = itemDate.trim() || new Date().toISOString().slice(0, 10);
 
-    if (cleanTitle.length < BLUEPRINT_CONSTRAINTS.TITLE_MIN_LEN) return;
-    if (cleanDesc.length < BLUEPRINT_CONSTRAINTS.DESCRIPTION_MIN_LEN) return;
+    if (cleanTitle.length < BLUEPRINT_CONSTRAINTS.TITLE_MIN_LEN) {
+      onNotify(
+        'Title Required',
+        'Please enter a descriptive title for your lost item (at least 2 characters).',
+        'warning'
+      );
+      return;
+    }
+    if (cleanDesc.length < BLUEPRINT_CONSTRAINTS.DESCRIPTION_MIN_LEN) {
+      onNotify(
+        'Description Required',
+        'Please enter identifying details for your lost item (at least 4 characters).',
+        'warning'
+      );
+      return;
+    }
 
     setReportSubmitting(true);
     try {
+      let finalImageUrl = itemImageUrl;
+      let finalImageHash = itemImageHash;
+
+      if (!finalImageUrl || !finalImageHash) {
+        const fallbackRaw = renderCampusItemCanvas(
+          activePresetKey || cleanTitle || itemCategory,
+          'query',
+          itemCategory
+        );
+        const computed = await computePerceptualHash(fallbackRaw);
+        finalImageUrl = computed.previewDataUrl;
+        finalImageHash = computed.hashHex;
+      }
+
       const newId = `item_lost_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       await onCreateItem({
         id: newId,
@@ -320,17 +342,17 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
         title: cleanTitle,
         category: itemCategory,
         location: cleanLocation,
-        dateOccurred: itemDate,
+        dateOccurred: cleanDate,
         description: cleanDesc,
         imageDataUrl: finalImageUrl.slice(0, BLUEPRINT_CONSTRAINTS.IMAGE_DATA_URL_MAX_LEN),
         imageHash: finalImageHash,
         status: 'approved',
         reporterId: user.uid,
-        reporterName: user.displayName,
+        reporterName: (user.displayName || 'University Student').slice(0, 100),
         visibility: 'campus',
       });
 
-      const msg = `Lost item report "${cleanTitle}" filed with 64-bit hash 0x${finalImageHash}. You can now match it in Image Hash Search.`;
+      const msg = `Lost item report "${cleanTitle}" filed with 64-bit hash 0x${finalImageHash}. You can now match it in Image Hash Search or view it below.`;
       setReportSuccess(msg);
       onNotify('Lost Item Report Filed', msg, 'success');
       setItemTitle('');
@@ -338,6 +360,13 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       setItemImageUrl('');
       setItemImageHash('');
       setActivePresetKey(null);
+    } catch (err) {
+      console.error('Error filing loss report:', err);
+      onNotify(
+        'Could Not File Report',
+        err instanceof Error ? err.message : 'Please check your input and try again.',
+        'warning'
+      );
     } finally {
       setReportSubmitting(false);
     }
@@ -1257,6 +1286,83 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                 </button>
               </div>
             </form>
+
+            {/* Active Filed Lost Item Reports List on the same tab for immediate visibility */}
+            {myLostReports.length > 0 && (
+              <div className="pt-6 border-t border-slate-200 space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 font-display">
+                      Your Active Filed Lost Item Reports ({myLostReports.length})
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Click &ldquo;Match in Image Hash Search&rdquo; to compare any filed report against the Found Directory.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('my_claims')}
+                    className="text-xs font-semibold text-[#1D4ED8] hover:underline cursor-pointer"
+                  >
+                    View All in My Claims &amp; Status →
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {myLostReports.map((lost) => (
+                    <div
+                      key={lost.id}
+                      className="p-4 border border-slate-200 rounded-xl flex gap-4 items-start bg-slate-50/50"
+                    >
+                      <img
+                        src={getItemDisplayImage(lost)}
+                        alt={lost.title}
+                        referrerPolicy="no-referrer"
+                        className="w-20 aspect-4/3 rounded-lg object-cover border border-slate-200 bg-white shrink-0"
+                      />
+                      <div className="space-y-1.5 min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="font-semibold text-amber-800 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                            Lost Report Active
+                          </span>
+                          <span className="font-mono text-[11px] text-slate-500">
+                            0x{lost.imageHash.slice(0, 8)}
+                          </span>
+                        </div>
+                        <h4 className="text-sm font-bold text-slate-900 truncate">{lost.title}</h4>
+                        <p className="text-xs text-slate-600 truncate">{lost.location}</p>
+                        <div className="flex flex-wrap items-center gap-3 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              loadQueryImageForHash(getItemDisplayImage(lost), lost.title, lost.id);
+                              setActiveTab('image_search');
+                            }}
+                            className="text-xs font-semibold text-[#1D4ED8] hover:underline cursor-pointer"
+                          >
+                            Match in Image Hash Search →
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await onDeleteItem(lost.id);
+                              onNotify(
+                                'Lost Report Withdrawn',
+                                `Removed "${lost.title}" from active lost reports.`,
+                                'info'
+                              );
+                            }}
+                            className="text-xs font-medium text-rose-600 hover:underline cursor-pointer"
+                          >
+                            Withdraw Report
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </motion.div>
         )}
 
