@@ -188,15 +188,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onOpenAuth }) => {
                 <label className="block text-xs font-medium text-slate-600">
                   Select a campus item to inspect hash resilience across camera angles:
                 </label>
-                <div className="grid grid-cols-3 gap-1.5 bg-slate-100 p-1 rounded-lg">
-                  {PRESET_CAMPUS_VISUALS.slice(0, 3).map((preset) => (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 bg-slate-100 p-1 rounded-lg">
+                  {PRESET_CAMPUS_VISUALS.slice(0, 4).map((preset) => (
                     <button
                       key={preset.key}
                       type="button"
                       onClick={() => setSelectedDemoPreset(preset.key)}
-                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors truncate cursor-pointer ${
+                      className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors truncate cursor-pointer text-center ${
                         selectedDemoPreset === preset.key
-                          ? 'bg-white text-slate-900 shadow-xs'
+                          ? 'bg-white text-slate-900 shadow-xs font-semibold'
                           : 'text-slate-600 hover:text-slate-900'
                       }`}
                     >

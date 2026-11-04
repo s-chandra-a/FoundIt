@@ -30,6 +30,7 @@ import {
 import {
   comparePerceptualHashes,
   computePerceptualHash,
+  getItemDisplayImage,
   hexToBitArray,
   PRESET_CAMPUS_VISUALS,
   renderCampusItemCanvas,
@@ -623,7 +624,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                       <div>
                         <div className="aspect-4/3 bg-slate-100 border-b border-slate-200 overflow-hidden relative">
                           <img
-                            src={item.imageDataUrl}
+                            src={getItemDisplayImage(item)}
                             alt={item.title}
                             referrerPolicy="no-referrer"
                             className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-200"
@@ -766,7 +767,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                                 type="button"
                                 onClick={() =>
                                   loadQueryImageForHash(
-                                    lostItem.imageDataUrl,
+                                    getItemDisplayImage(lostItem),
                                     lostItem.title,
                                     lostItem.id
                                   )
@@ -925,7 +926,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                             <div className="flex items-start gap-4 flex-1 min-w-0">
                               <div className="w-24 aspect-4/3 rounded-lg overflow-hidden border border-slate-200 bg-slate-100 shrink-0">
                                 <img
-                                  src={item.imageDataUrl}
+                                  src={getItemDisplayImage(item)}
                                   alt={item.title}
                                   referrerPolicy="no-referrer"
                                   className="w-full h-full object-cover"
@@ -1386,7 +1387,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                     >
                       <div className="flex items-center gap-3.5">
                         <img
-                          src={item.imageDataUrl}
+                          src={getItemDisplayImage(item)}
                           alt={item.title}
                           referrerPolicy="no-referrer"
                           className="w-16 h-12 object-cover rounded-lg border border-slate-200 shrink-0"
@@ -1407,7 +1408,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                           type="button"
                           onClick={async () => {
                             await loadQueryImageForHash(
-                              item.imageDataUrl,
+                              getItemDisplayImage(item),
                               item.title,
                               item.id
                             );
@@ -1419,8 +1420,19 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                         </button>
                         <button
                           type="button"
-                          onClick={() => onDeleteItem(item.id)}
-                          className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-all cursor-pointer"
+                          onClick={async () => {
+                            try {
+                              await onDeleteItem(item.id);
+                              onNotify(
+                                'Report Withdrawn',
+                                `Lost item report "${item.title}" was withdrawn from the campus directory.`,
+                                'info'
+                              );
+                            } catch (err) {
+                              console.error('Withdraw report failed:', err);
+                            }
+                          }}
+                          className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:text-red-700 hover:bg-red-50 active:scale-95 rounded-lg transition-all cursor-pointer"
                         >
                           Withdraw Report
                         </button>
@@ -1463,7 +1475,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
 
               <div className="flex items-center gap-3 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs">
                 <img
-                  src={claimingItem.imageDataUrl}
+                  src={getItemDisplayImage(claimingItem)}
                   alt={claimingItem.title}
                   referrerPolicy="no-referrer"
                   className="w-16 h-12 object-cover rounded border border-slate-200"

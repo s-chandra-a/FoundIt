@@ -33,6 +33,7 @@ import {
 import {
   computePerceptualHash,
   comparePerceptualHashes,
+  getItemDisplayImage,
   PRESET_CAMPUS_VISUALS,
   renderCampusItemCanvas,
 } from '../utils/imageHash';
@@ -1073,7 +1074,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           >
                             <div className="flex items-center gap-2.5 min-w-0">
                               <img
-                                src={item.imageDataUrl}
+                                src={getItemDisplayImage(item)}
                                 alt={item.title}
                                 className="w-11 h-11 rounded-lg object-cover border border-slate-200 shrink-0"
                               />
@@ -1282,7 +1283,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <div className="flex items-center gap-3.5">
                         {linkedItem && (
                           <img
-                            src={linkedItem.imageDataUrl}
+                            src={getItemDisplayImage(linkedItem)}
                             alt={claim.itemTitle}
                             className="w-14 h-14 rounded-xl object-cover border border-slate-200 shrink-0"
                           />
@@ -1478,7 +1479,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               >
                                 <div className="flex items-center gap-2.5 min-w-0">
                                   <img
-                                    src={lostItem.imageDataUrl}
+                                    src={getItemDisplayImage(lostItem)}
                                     alt={lostItem.title}
                                     className="w-11 h-11 rounded-lg object-cover border border-slate-200 shrink-0"
                                   />
@@ -1585,7 +1586,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   >
                     <div className="flex items-start gap-4">
                       <img
-                        src={item.imageDataUrl}
+                        src={getItemDisplayImage(item)}
                         alt={item.title}
                         className="w-20 h-20 rounded-xl object-cover border border-slate-200 shrink-0"
                       />
@@ -1791,7 +1792,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <td className="py-3.5 px-4">
                         <div className="flex items-center gap-3">
                           <img
-                            src={item.imageDataUrl}
+                            src={getItemDisplayImage(item)}
                             alt={item.title}
                             className="w-10 h-10 rounded-lg object-cover bg-slate-100 border border-slate-200 shrink-0"
                           />

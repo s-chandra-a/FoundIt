@@ -49,7 +49,13 @@ import {
   UserRole,
 } from './types';
 import { buildInitialCampusItems, buildInitialSampleClaims } from './utils/seedData';
-import { comparePerceptualHashes } from './utils/imageHash';
+import {
+  comparePerceptualHashes,
+  computePerceptualHash,
+  getItemDisplayImage,
+  isLegacyBookFallback,
+  renderCampusItemCanvas,
+} from './utils/imageHash';
 import { LandingPage } from './components/LandingPage';
 import { AuthModal } from './components/AuthModal';
 import { StudentDashboard, StudentTab } from './components/StudentDashboard';
@@ -59,8 +65,8 @@ import {
   ResolvedMatchedFoundDetails,
 } from './components/AdminDashboard';
 
-const LOCAL_ITEMS_KEY = 'foundit_campus_items_v3';
-const LOCAL_CLAIMS_KEY = 'foundit_campus_claims_v3';
+const LOCAL_ITEMS_KEY = 'foundit_campus_items_v5';
+const LOCAL_CLAIMS_KEY = 'foundit_campus_claims_v5';
 
 export default function App() {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
@@ -198,8 +204,11 @@ export default function App() {
             (i) =>
               i.id === 'item_macbook_101' ||
               i.id === 'item_lost_macbook_201' ||
+              isLegacyBookFallback(i) ||
               (i.type === 'lost' && i.reporterName.toLowerCase().includes('admin'))
-          );
+          ) ||
+          !list.some((i) => i.id === 'item_macbook_found_101') ||
+          !list.some((i) => i.id === 'item_airpods_103');
 
         // Check server or localStorage first so changes persist across Student <-> Admin switches
         try {
@@ -271,17 +280,61 @@ export default function App() {
     const unsubItems = onSnapshot(
       itemsQuery,
       async (snapshot) => {
-        const fetchedItems: CampusItem[] = snapshot.docs.map(
-          (docSnap) => docSnap.data() as CampusItem
-        );
+        const fetchedItems: CampusItem[] = snapshot.docs.map((docSnap) => {
+          const it = docSnap.data() as CampusItem;
+          const displayImg = getItemDisplayImage(it);
+          if (displayImg !== it.imageDataUrl) {
+            return {
+              ...it,
+              imageDataUrl: displayImg,
+            };
+          }
+          return it;
+        });
         setItems(fetchedItems);
 
-        const needsLegacyCleanup = fetchedItems.some(
-          (i) =>
-            i.id === 'item_macbook_101' ||
-            i.id === 'item_lost_macbook_201' ||
-            (i.type === 'lost' && i.reporterName.toLowerCase().includes('admin'))
-        );
+        // Auto-heal any legacy fallback book items (0xfffbdbfb...) in both state and Firestore
+        for (const rawDoc of snapshot.docs) {
+          const rawItem = rawDoc.data() as CampusItem;
+          if (isLegacyBookFallback(rawItem)) {
+            const fixedImg = renderCampusItemCanvas(
+              rawItem.title,
+              rawItem.type === 'lost' ? 'query' : 'catalog',
+              rawItem.category
+            );
+            computePerceptualHash(fixedImg)
+              .then((comp) => {
+                setItems((prev) =>
+                  prev.map((p) =>
+                    p.id === rawItem.id
+                      ? {
+                          ...p,
+                          imageDataUrl: comp.previewDataUrl,
+                          imageHash: comp.hashHex,
+                        }
+                      : p
+                  )
+                );
+                updateDoc(doc(db, 'items', rawItem.id), {
+                  imageDataUrl: comp.previewDataUrl,
+                  imageHash: comp.hashHex,
+                  updatedAt: serverTimestamp(),
+                }).catch(() => {});
+              })
+              .catch(() => {});
+          }
+        }
+
+        const needsLegacyCleanup =
+          fetchedItems.some(
+            (i) =>
+              i.id === 'item_macbook_101' ||
+              i.id === 'item_lost_macbook_201' ||
+              (i.type === 'lost' && i.reporterName.toLowerCase().includes('admin'))
+          ) ||
+          (fetchedItems.length > 0 &&
+            (!fetchedItems.some((i) => i.id === 'item_macbook_found_101') ||
+              !fetchedItems.some((i) => i.id === 'item_airpods_103')));
 
         if ((fetchedItems.length === 0 || needsLegacyCleanup) && !hasSeededOnce) {
           setHasSeededOnce(true);
@@ -292,10 +345,23 @@ export default function App() {
               userProfile.role
             );
             const seedIds = new Set(seedItems.map((s) => s.id));
+            // Immediately reflect full rich catalog in UI state
+            setItems((prev) => {
+              const customItems = prev.filter(
+                (p) =>
+                  !seedIds.has(p.id) &&
+                  !p.id.startsWith('item_sony_xm5_') &&
+                  !p.id.startsWith('item_keys_id_') &&
+                  !p.id.startsWith('item_ti84_calc_') &&
+                  !p.id.startsWith('item_notebook_')
+              );
+              return [...seedItems, ...customItems];
+            });
+
             if (needsLegacyCleanup && userProfile.role === 'admin') {
               for (const oldItem of fetchedItems) {
                 if (!seedIds.has(oldItem.id)) {
-                  await deleteDoc(doc(db, 'items', oldItem.id));
+                  await deleteDoc(doc(db, 'items', oldItem.id)).catch(() => {});
                 }
               }
             }
@@ -304,7 +370,7 @@ export default function App() {
                 ...item,
                 createdAt: serverTimestamp(),
                 updatedAt: serverTimestamp(),
-              });
+              }).catch(() => {});
             }
             const seedClaims = buildInitialSampleClaims(
               userProfile.uid,
@@ -316,7 +382,7 @@ export default function App() {
                 ...clm,
                 createdAt: serverTimestamp(),
                 updatedAt: serverTimestamp(),
-              });
+              }).catch(() => {});
             }
           } catch (seedErr) {
             console.warn('Initial seed skipped:', seedErr);
@@ -635,11 +701,13 @@ export default function App() {
 
     const orphanedClaims = claims.filter((c) => c.itemId === itemId);
 
+    // Optimistically update React state immediately so item is removed instantly from UI
+    const nextItems = items.filter((it) => it.id !== itemId);
+    const nextClaims = claims.filter((c) => c.itemId !== itemId);
+    setItems(nextItems);
+    setClaims(nextClaims);
+
     if (userProfile.isLocalDemoSession) {
-      const nextItems = items.filter((it) => it.id !== itemId);
-      const nextClaims = claims.filter((c) => c.itemId !== itemId);
-      setItems(nextItems);
-      setClaims(nextClaims);
       await persistStateSnapshot(nextItems, nextClaims);
       return;
     }
@@ -647,12 +715,31 @@ export default function App() {
     const path = `items/${itemId}`;
     try {
       await deleteDoc(doc(db, 'items', itemId));
-      for (const clm of orphanedClaims) {
-        await deleteDoc(doc(db, 'claims', clm.id));
-      }
     } catch (error) {
+      console.error('Failed to delete item from Firestore:', error);
       handleFirestoreError(error, OperationType.DELETE, path);
+      // Revert state if deletion failed
+      setItems(items);
+      setClaims(claims);
+      return;
     }
+
+    // Safely delete any orphaned claims if allowed (non-blocking for item deletion)
+    for (const clm of orphanedClaims) {
+      if (
+        userProfile.role === 'admin' ||
+        clm.claimantId === userProfile.uid ||
+        clm.claimantId === 'student_alex_rivera'
+      ) {
+        try {
+          await deleteDoc(doc(db, 'claims', clm.id));
+        } catch (claimErr) {
+          console.warn('Could not delete associated claim:', claimErr);
+        }
+      }
+    }
+
+    await persistStateSnapshot(nextItems, nextClaims);
   };
 
   const handleModerateClaim = async (
